@@ -3,21 +3,30 @@ import React, { useState, useEffect, useRef } from 'react';
 import { ApiKeySelector } from './components/ApiKeySelector';
 import { LoadingOverlay } from './components/LoadingOverlay';
 import { ImageUpload } from './components/ImageUpload';
+import { AudioRecorder } from './components/AudioRecorder';
+import { LipsyncPreview } from './components/LipsyncPreview';
 import { 
   optimizePrompt, 
   generateAvatarImage, 
   generateAvatarVideo, 
   critiqueGeneratedImage,
   refinePrompt,
+  analyzeVoiceProfile,
+  generateSpeech,
+  generateVisemes,
+  analyzeMouthCoordinates,
   GeneratedImage 
 } from './services/geminiService';
-import { AppStep, AvatarFormData, GenerationLog, CritiqueResult } from './types';
+import { AppStep, AvatarFormData, GenerationLog, CritiqueResult, VoiceSessionData } from './types';
 
-const MAX_REFINEMENT_LOOPS = 3; // Step 5: "If quality plateaus or loops 3x"
+const MAX_REFINEMENT_LOOPS = 3; 
 const QUALITY_THRESHOLD = 85;
 
 const App: React.FC = () => {
   const [isKeyReady, setIsKeyReady] = useState(false);
+  const [activeTab, setActiveTab] = useState<'VISUAL' | 'VOICE'>('VISUAL');
+  
+  // Visual Studio State
   const [step, setStep] = useState<AppStep>(AppStep.INPUT);
   const [formData, setFormData] = useState<AvatarFormData>({
     name: '',
@@ -27,7 +36,6 @@ const App: React.FC = () => {
     userImage: '',
     backgroundMode: 'STUDIO'
   });
-  
   const [generatedPrompt, setGeneratedPrompt] = useState<string>('');
   const [generatedImage, setGeneratedImage] = useState<GeneratedImage | null>(null);
   const [generatedVideoUrl, setGeneratedVideoUrl] = useState<string | null>(null);
@@ -36,6 +44,10 @@ const App: React.FC = () => {
   const [critique, setCritique] = useState<CritiqueResult | null>(null);
   const [loopCount, setLoopCount] = useState(0);
   const [userFeedback, setUserFeedback] = useState('');
+
+  // Voice Studio State
+  const [voiceData, setVoiceData] = useState<VoiceSessionData>({ script: "Hello! I am ready to explore this world." });
+  const [isVoiceProcessing, setIsVoiceProcessing] = useState(false);
 
   const logsEndRef = useRef<HTMLDivElement>(null);
 
@@ -56,19 +68,17 @@ const App: React.FC = () => {
     setFormData(prev => ({ ...prev, userImage: base64 }));
   };
 
-  // Helper to execute the core generation flow
-  // Accepts an optional existing prompt/critique to resume the loop from Step 7
+  // --- Visual Logic ---
   const executeGenerationLoop = async (initialPrompt?: string, initialFeedback?: string) => {
     setError(null);
     setGeneratedVideoUrl(null);
-    if (!initialPrompt) setLogs([]); // Clear logs if starting fresh
+    if (!initialPrompt) setLogs([]); 
     setLoopCount(0);
     setCritique(null);
 
     try {
       let currentPrompt = initialPrompt || '';
 
-      // STEP 2: Initial Generation
       if (!currentPrompt) {
         setStep(AppStep.OPTIMIZING_PROMPT);
         addLog(`Initializing Avatar Agent...`);
@@ -86,10 +96,8 @@ const App: React.FC = () => {
         setGeneratedPrompt(currentPrompt);
         addLog("Visual blueprint constructed.", 'success');
       } else if (initialFeedback) {
-        // Step 7 Entry Point: We have a prompt but user gave feedback
         addLog(`Applying user feedback: "${initialFeedback}"`, 'warning');
         setStep(AppStep.REFINING);
-        // Create a mock critique to pass format
         const mockCritique: CritiqueResult = { score: 0, feedback: "User Feedback Loop", suggestions: initialFeedback };
         currentPrompt = await refinePrompt(currentPrompt, mockCritique, initialFeedback);
         setGeneratedPrompt(currentPrompt);
@@ -97,13 +105,10 @@ const App: React.FC = () => {
 
       setStep(AppStep.GENERATING_IMAGE);
       addLog("Generating Concept (V1)...");
-      
-      // Pass userImage to allow "exact similarity" conditioning
       let currentImage = await generateAvatarImage(currentPrompt, formData.userImage);
       setGeneratedImage(currentImage);
       addLog("Concept V1 generated.", 'info');
 
-      // STEP 3: Critique Loop
       let loops = 0;
       let bestImage = currentImage;
       let bestScore = 0;
@@ -118,18 +123,15 @@ const App: React.FC = () => {
         addLog(`Quality Score: ${critiqueResult.score}/100`, critiqueResult.score > QUALITY_THRESHOLD ? 'success' : 'warning');
         addLog(`Critique: ${critiqueResult.feedback}`);
 
-        // Track best
         if (critiqueResult.score > bestScore) {
           bestScore = critiqueResult.score;
           bestImage = currentImage;
         }
 
-        // STEP 5: Validation
         if (critiqueResult.score >= QUALITY_THRESHOLD) {
           isSatisfied = true;
           addLog("Quality threshold met (>85%).", 'success');
         } else {
-          // STEP 4: Improvement
           setStep(AppStep.REFINING);
           addLog("Refining prompt based on critique...", 'info');
           currentPrompt = await refinePrompt(currentPrompt, critiqueResult);
@@ -138,9 +140,6 @@ const App: React.FC = () => {
           setStep(AppStep.GENERATING_IMAGE);
           addLog(`Regenerating Concept (V${loops + 2})...`);
           const nextImage = await generateAvatarImage(currentPrompt, formData.userImage);
-          
-          // "Compares V2 vs V1" - implicitly done by tracking bestScore/bestImage
-          // We display the new image immediately
           currentImage = nextImage;
           setGeneratedImage(currentImage);
 
@@ -149,7 +148,6 @@ const App: React.FC = () => {
         }
       }
 
-      // Restore best image if the last one wasn't the best
       if (currentImage !== bestImage) {
         addLog("Restoring best performing version...", 'success');
         setGeneratedImage(bestImage);
@@ -158,12 +156,10 @@ const App: React.FC = () => {
 
       if (!isSatisfied) {
         addLog("Max refinement loops reached.", 'warning');
-        // "Present to user for approval"
         setStep(AppStep.AWAITING_APPROVAL);
         return; 
       }
       
-      // STEP 6: Veo Video Generation
       await startVideoGeneration(currentImage);
 
     } catch (err: any) {
@@ -203,10 +199,8 @@ const App: React.FC = () => {
     await executeGenerationLoop();
   };
 
-  // STEP 7: User Feedback Loop
   const handleUserRefine = async () => {
     if (!userFeedback.trim()) return;
-    // Re-enter loop with current prompt and user feedback
     await executeGenerationLoop(generatedPrompt, userFeedback);
     setUserFeedback('');
   };
@@ -226,6 +220,60 @@ const App: React.FC = () => {
     setCritique(null);
     setError(null);
     setUserFeedback('');
+    setVoiceData({ script: voiceData.script }); // Keep script
+  };
+
+  // --- Voice Logic ---
+  const handleVoiceRecording = async (base64: string) => {
+    setVoiceData(prev => ({ ...prev, userVoiceBase64: base64 }));
+    setIsVoiceProcessing(true);
+    addLog("Analyzing voice profile...", 'info');
+    try {
+      const profile = await analyzeVoiceProfile(base64);
+      setVoiceData(prev => ({ ...prev, voiceProfile: profile }));
+      addLog(`Voice Profile: ${profile.tone}, ${profile.speech_pace_wpm}wpm. Matched to: ${profile.recommended_voice_id}`, 'success');
+    } catch (e: any) {
+      addLog(`Voice Analysis Failed: ${e.message}`, 'error');
+    } finally {
+      setIsVoiceProcessing(false);
+    }
+  };
+
+  const handleGenerateLipsync = async () => {
+    if (!voiceData.voiceProfile || !voiceData.script || !generatedImage) {
+      addLog("Missing voice profile, script, or avatar image.", 'error');
+      return;
+    }
+    
+    setIsVoiceProcessing(true);
+    try {
+      // 1. Analyze Mouth
+      if (!voiceData.mouthData) {
+        addLog("Detecting mouth coordinates...", 'info');
+        const mouthData = await analyzeMouthCoordinates(generatedImage.data);
+        setVoiceData(prev => ({ ...prev, mouthData }));
+      }
+
+      // 2. Generate Audio
+      addLog("Synthesizing speech...", 'info');
+      const audio = await generateSpeech(voiceData.script, voiceData.voiceProfile.recommended_voice_id);
+      
+      // 3. Generate Visemes
+      // Estimate duration: approx 150 words per minute -> 2.5 words per sec
+      const wordCount = voiceData.script.split(' ').length;
+      const approxDuration = wordCount / (voiceData.voiceProfile.speech_pace_wpm / 60);
+      
+      addLog("Calculating lipsync animation...", 'info');
+      const visemes = await generateVisemes(voiceData.script, approxDuration);
+
+      setVoiceData(prev => ({ ...prev, generatedAudioBase64: audio, visemes }));
+      addLog("Lipsync Animation Ready!", 'success');
+
+    } catch (e: any) {
+      addLog(`Lipsync Failed: ${e.message}`, 'error');
+    } finally {
+      setIsVoiceProcessing(false);
+    }
   };
 
   return (
@@ -245,111 +293,159 @@ const App: React.FC = () => {
               Avatar<span className="text-neon-blue">Crafter</span> 360
             </h1>
           </div>
-          <div className="text-xs text-gray-500 border border-gray-800 px-3 py-1 rounded-full">
-            Agent Loop v2.0
+          
+          <div className="flex space-x-4 bg-gray-900 rounded-full p-1 border border-gray-800">
+            <button 
+              onClick={() => setActiveTab('VISUAL')}
+              className={`px-4 py-1.5 rounded-full text-xs font-bold transition-all ${activeTab === 'VISUAL' ? 'bg-neon-blue text-white shadow-lg shadow-neon-blue/20' : 'text-gray-400 hover:text-white'}`}
+            >
+              Visual Studio
+            </button>
+            <button 
+              onClick={() => setActiveTab('VOICE')}
+              disabled={!generatedImage}
+              className={`px-4 py-1.5 rounded-full text-xs font-bold transition-all ${activeTab === 'VOICE' ? 'bg-neon-purple text-white shadow-lg shadow-neon-purple/20' : 'text-gray-400 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed'}`}
+            >
+              Voice Studio
+            </button>
           </div>
         </div>
       </header>
 
       <main className="flex-grow max-w-7xl mx-auto w-full px-4 py-8 grid grid-cols-1 lg:grid-cols-12 gap-8">
         
+        {/* LEFT PANEL: INPUTS */}
         <div className="lg:col-span-4 space-y-6">
           <div className="bg-gray-900 border border-gray-800 rounded-2xl p-6 shadow-xl">
-            <h2 className="text-xl font-semibold mb-6 flex items-center text-white">
-              <span className="w-2 h-8 bg-neon-blue rounded-full mr-3"></span>
-              Step 1: User Input
-            </h2>
+            {activeTab === 'VISUAL' ? (
+              <>
+                <h2 className="text-xl font-semibold mb-6 flex items-center text-white">
+                  <span className="w-2 h-8 bg-neon-blue rounded-full mr-3"></span>
+                  Character Design
+                </h2>
+                <form onSubmit={handleSubmit} className="space-y-5">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-400 mb-1">Name</label>
+                    <input 
+                      type="text" name="name" value={formData.name} onChange={handleInputChange}
+                      disabled={step !== AppStep.INPUT && step !== AppStep.ERROR}
+                      className="w-full bg-gray-850 border border-gray-700 rounded-lg px-4 py-3 text-white focus:outline-none focus:border-neon-blue transition-all"
+                      required
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-400 mb-1">Description</label>
+                    <textarea 
+                      name="description" value={formData.description} onChange={handleInputChange}
+                      disabled={step !== AppStep.INPUT && step !== AppStep.ERROR}
+                      rows={3}
+                      className="w-full bg-gray-850 border border-gray-700 rounded-lg px-4 py-3 text-white focus:outline-none focus:border-neon-blue transition-all resize-none"
+                      required
+                    />
+                  </div>
+                  <ImageUpload onImageSelected={handleImageSelected} selectedImage={formData.userImage} />
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-sm font-medium text-gray-400 mb-1">Style</label>
+                      <input 
+                        type="text" name="style" value={formData.style} onChange={handleInputChange}
+                        disabled={step !== AppStep.INPUT && step !== AppStep.ERROR}
+                        className="w-full bg-gray-850 border border-gray-700 rounded-lg px-4 py-3 text-white text-sm"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-400 mb-1">Scenario</label>
+                      <input 
+                        type="text" name="scenario" value={formData.scenario} onChange={handleInputChange}
+                        disabled={step !== AppStep.INPUT && step !== AppStep.ERROR}
+                        className="w-full bg-gray-850 border border-gray-700 rounded-lg px-4 py-3 text-white text-sm"
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-400 mb-1">Background Mode</label>
+                    <select
+                      name="backgroundMode"
+                      value={formData.backgroundMode}
+                      onChange={handleInputChange}
+                      disabled={step !== AppStep.INPUT && step !== AppStep.ERROR}
+                      className="w-full bg-gray-850 border border-gray-700 rounded-lg px-4 py-3 text-white focus:outline-none focus:border-neon-blue transition-all text-sm appearance-none"
+                    >
+                      <option value="STUDIO">Studio (Neutral Background)</option>
+                      <option value="IMMERSIVE">Immersive (In Scenario)</option>
+                      <option value="GAMEPLAY">Gameplay (Game Screenshot)</option>
+                    </select>
+                  </div>
 
-            <form onSubmit={handleSubmit} className="space-y-5">
-              <div>
-                <label className="block text-sm font-medium text-gray-400 mb-1">Name</label>
-                <input 
-                  type="text" name="name" value={formData.name} onChange={handleInputChange}
-                  disabled={step !== AppStep.INPUT && step !== AppStep.ERROR}
-                  className="w-full bg-gray-850 border border-gray-700 rounded-lg px-4 py-3 text-white focus:outline-none focus:border-neon-blue transition-all"
-                  required
-                />
-              </div>
+                  {step === AppStep.INPUT || step === AppStep.ERROR ? (
+                    <button 
+                      type="submit" 
+                      disabled={!isKeyReady}
+                      className={`w-full py-4 rounded-lg font-bold text-lg tracking-wide shadow-lg transition-all ${
+                        isKeyReady 
+                          ? 'bg-gradient-to-r from-neon-blue to-neon-purple text-white shadow-neon-blue/20 hover:shadow-neon-blue/40 hover:scale-[1.02]' 
+                          : 'bg-gray-700 text-gray-400 cursor-not-allowed'
+                      }`}
+                    >
+                      Initiate Agent Loop
+                    </button>
+                  ) : (
+                    <div className="w-full py-4 rounded-lg bg-gray-800 border border-gray-700 text-center text-neon-blue font-medium flex items-center justify-center space-x-2">
+                       <span className="w-2 h-2 bg-neon-blue rounded-full animate-pulse"></span>
+                       <span>Processing: {step}</span>
+                    </div>
+                  )}
+                </form>
+              </>
+            ) : (
+              <>
+                <h2 className="text-xl font-semibold mb-6 flex items-center text-white">
+                  <span className="w-2 h-8 bg-neon-purple rounded-full mr-3"></span>
+                  Voice Cloning & Lipsync
+                </h2>
+                <div className="space-y-6">
+                  {/* Phase 1: Voice Analysis */}
+                  <div>
+                    <h3 className="text-sm text-gray-400 mb-2 uppercase tracking-wide">Phase 1: Voice Analysis</h3>
+                    <AudioRecorder onRecordingComplete={handleVoiceRecording} />
+                    {voiceData.voiceProfile && (
+                       <div className="mt-3 bg-gray-800 p-3 rounded text-xs space-y-1 border border-gray-700">
+                          <p><span className="text-gray-400">Tone:</span> {voiceData.voiceProfile.tone}</p>
+                          <p><span className="text-gray-400">Match:</span> <span className="text-neon-purple font-bold">{voiceData.voiceProfile.recommended_voice_id}</span></p>
+                          <div className="w-full bg-gray-700 h-1 rounded-full mt-2">
+                            <div className="bg-neon-purple h-1 rounded-full" style={{ width: `${voiceData.voiceProfile.confidence * 100}%` }}></div>
+                          </div>
+                       </div>
+                    )}
+                  </div>
 
-              <div>
-                <label className="block text-sm font-medium text-gray-400 mb-1">Description</label>
-                <textarea 
-                  name="description" value={formData.description} onChange={handleInputChange}
-                  disabled={step !== AppStep.INPUT && step !== AppStep.ERROR}
-                  rows={3}
-                  className="w-full bg-gray-850 border border-gray-700 rounded-lg px-4 py-3 text-white focus:outline-none focus:border-neon-blue transition-all resize-none"
-                  required
-                />
-              </div>
+                  {/* Phase 2: Script */}
+                  <div>
+                    <h3 className="text-sm text-gray-400 mb-2 uppercase tracking-wide">Phase 2: Script</h3>
+                    <textarea 
+                      value={voiceData.script}
+                      onChange={(e) => setVoiceData({...voiceData, script: e.target.value})}
+                      className="w-full bg-gray-850 border border-gray-700 rounded-lg px-4 py-3 text-white focus:outline-none focus:border-neon-purple transition-all resize-none"
+                      rows={3}
+                      placeholder="Enter what the character should say..."
+                    />
+                  </div>
 
-              <ImageUpload 
-                onImageSelected={handleImageSelected} 
-                selectedImage={formData.userImage} 
-              />
-
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-400 mb-1">Style</label>
-                  <input 
-                    type="text" name="style" value={formData.style} onChange={handleInputChange}
-                    disabled={step !== AppStep.INPUT && step !== AppStep.ERROR}
-                    className="w-full bg-gray-850 border border-gray-700 rounded-lg px-4 py-3 text-white text-sm"
-                  />
+                  <button 
+                    onClick={handleGenerateLipsync}
+                    disabled={isVoiceProcessing || !voiceData.voiceProfile}
+                    className="w-full py-4 rounded-lg font-bold text-lg tracking-wide bg-gradient-to-r from-neon-purple to-pink-500 text-white shadow-lg hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {isVoiceProcessing ? 'Processing...' : 'Generate Lipsync Animation'}
+                  </button>
                 </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-400 mb-1">Scenario</label>
-                  <input 
-                    type="text" name="scenario" value={formData.scenario} onChange={handleInputChange}
-                    disabled={step !== AppStep.INPUT && step !== AppStep.ERROR}
-                    className="w-full bg-gray-850 border border-gray-700 rounded-lg px-4 py-3 text-white text-sm"
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-400 mb-1">Background Mode</label>
-                <select
-                  name="backgroundMode"
-                  value={formData.backgroundMode}
-                  onChange={handleInputChange}
-                  disabled={step !== AppStep.INPUT && step !== AppStep.ERROR}
-                  className="w-full bg-gray-850 border border-gray-700 rounded-lg px-4 py-3 text-white focus:outline-none focus:border-neon-blue transition-all text-sm appearance-none"
-                >
-                  <option value="STUDIO">Studio (Neutral Background)</option>
-                  <option value="IMMERSIVE">Immersive (In Scenario)</option>
-                  <option value="GAMEPLAY">Gameplay (Game Screenshot)</option>
-                </select>
-                <p className="text-xs text-gray-500 mt-1">
-                  {formData.backgroundMode === 'STUDIO' && "Best for character turnaround sheets and clean 3D assets."}
-                  {formData.backgroundMode === 'IMMERSIVE' && "Places character directly in the scenario environment."}
-                  {formData.backgroundMode === 'GAMEPLAY' && "Simulates a third-person game view with the environment."}
-                </p>
-              </div>
-
-              {step === AppStep.INPUT || step === AppStep.ERROR ? (
-                <button 
-                  type="submit" 
-                  disabled={!isKeyReady}
-                  className={`w-full py-4 rounded-lg font-bold text-lg tracking-wide shadow-lg transition-all ${
-                    isKeyReady 
-                      ? 'bg-gradient-to-r from-neon-blue to-neon-purple text-white shadow-neon-blue/20 hover:shadow-neon-blue/40 hover:scale-[1.02]' 
-                      : 'bg-gray-700 text-gray-400 cursor-not-allowed'
-                  }`}
-                >
-                  Initiate Agent Loop
-                </button>
-              ) : (
-                <div className="w-full py-4 rounded-lg bg-gray-800 border border-gray-700 text-center text-neon-blue font-medium flex items-center justify-center space-x-2">
-                   <span className="w-2 h-2 bg-neon-blue rounded-full animate-pulse"></span>
-                   <span>Processing: {step}</span>
-                </div>
-              )}
-            </form>
+              </>
+            )}
           </div>
 
           <div className="bg-black/50 border border-gray-800 rounded-xl p-4 h-72 overflow-hidden flex flex-col font-mono text-xs">
             <div className="flex items-center justify-between mb-2 text-gray-500 uppercase tracking-wider text-[10px]">
-              <span>Agent Process Log</span>
+              <span>System Log</span>
               <div className="flex space-x-1">
                 <span className="w-2 h-2 rounded-full bg-red-500"></span>
                 <span className="w-2 h-2 rounded-full bg-yellow-500"></span>
@@ -357,7 +453,6 @@ const App: React.FC = () => {
               </div>
             </div>
             <div className="flex-1 overflow-y-auto space-y-2 pr-2">
-              {logs.length === 0 && <span className="text-gray-600 italic">Waiting for input...</span>}
               {logs.map((log, i) => (
                 <div key={i} className="flex gap-2">
                   <span className="text-gray-600 select-none">[{log.timestamp}]</span>
@@ -375,11 +470,11 @@ const App: React.FC = () => {
           </div>
         </div>
 
+        {/* RIGHT PANEL: DISPLAY */}
         <div className="lg:col-span-8 space-y-6">
           <div className="bg-gray-900 border border-gray-800 rounded-2xl p-1 min-h-[600px] flex flex-col relative overflow-hidden shadow-2xl">
             
-            {/* Initial State */}
-            {step === AppStep.INPUT && (
+            {step === AppStep.INPUT && !generatedImage && (
               <div className="flex-1 flex flex-col items-center justify-center text-gray-600">
                 <div className="w-24 h-24 mb-4 border-2 border-dashed border-gray-700 rounded-full flex items-center justify-center">
                   <svg className="w-10 h-10" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -390,13 +485,13 @@ const App: React.FC = () => {
               </div>
             )}
 
-            {/* Loading States */}
             {step === AppStep.OPTIMIZING_PROMPT && <LoadingOverlay message="Step 2: Analysis" subMessage="Gemini 3 Pro is integrating your inputs..." />}
             {step === AppStep.CRITIQUING && <LoadingOverlay message="Step 3: Critique Loop" subMessage={`Agent is auditing the output (Cycle ${loopCount + 1})...`} />}
             {step === AppStep.REFINING && <LoadingOverlay message="Step 4: Self-Correction" subMessage="Refining prompt based on critique..." />}
-            
-            {/* Image Display */}
-            {generatedImage && !generatedVideoUrl && (
+            {isVoiceProcessing && <LoadingOverlay message="Voice Studio" subMessage="Synthesizing audio and calculating viseme timing..." />}
+
+            {/* VISUAL MODE DISPLAY */}
+            {activeTab === 'VISUAL' && generatedImage && !generatedVideoUrl && (
                <div className="flex-1 flex flex-col relative animate-fade-in">
                  {(step === AppStep.GENERATING_VIDEO) && (
                    <div className="absolute inset-0 flex items-center justify-center bg-black/70 backdrop-blur-sm z-20">
@@ -409,7 +504,6 @@ const App: React.FC = () => {
                   className={`w-full h-full object-contain bg-gray-950 transition-opacity duration-500 ${step === AppStep.REFINING ? 'opacity-50 blur-sm' : 'opacity-100'}`}
                  />
                  
-                 {/* Critique Overlay */}
                  {critique && step === AppStep.CRITIQUING && (
                     <div className="absolute bottom-6 left-6 right-6 bg-black/80 backdrop-blur border border-yellow-500/50 p-4 rounded-xl z-10 animate-slide-up">
                       <div className="flex items-start justify-between">
@@ -424,14 +518,12 @@ const App: React.FC = () => {
                     </div>
                  )}
 
-                 {/* Step 5: Manual Approval UI if loop fails to meet quality */}
                  {step === AppStep.AWAITING_APPROVAL && (
                    <div className="absolute inset-0 flex items-center justify-center bg-black/80 backdrop-blur-sm z-30">
                      <div className="bg-gray-900 border border-gray-700 p-8 rounded-2xl max-w-md text-center shadow-2xl">
                        <h3 className="text-xl font-bold text-white mb-2">Step 5: Validation Required</h3>
                        <p className="text-gray-400 mb-6">
                          The agent completed 3 refinement loops but the quality score ({critique?.score}%) is below threshold.
-                         Do you want to proceed with this version or refine manually?
                        </p>
                        <div className="flex space-x-4 justify-center">
                          <button onClick={handleApprove} className="px-6 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg font-medium">
@@ -444,14 +536,31 @@ const App: React.FC = () => {
                </div>
             )}
 
-            {/* Final Video */}
-            {generatedVideoUrl && (
+            {/* VOICE MODE DISPLAY (LIPSYNC) */}
+            {activeTab === 'VOICE' && generatedImage && (
+              <div className="flex-1 flex flex-col bg-black relative">
+                {voiceData.generatedAudioBase64 && voiceData.visemes && voiceData.mouthData ? (
+                  <LipsyncPreview 
+                    imageBase64={generatedImage.data}
+                    audioBase64={voiceData.generatedAudioBase64}
+                    visemes={voiceData.visemes}
+                    mouthData={voiceData.mouthData}
+                  />
+                ) : (
+                  <div className="flex-1 flex items-center justify-center text-gray-500">
+                    <p>Record voice and generate lipsync to preview animation</p>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* VEO VIDEO DISPLAY */}
+            {generatedVideoUrl && activeTab === 'VISUAL' && (
               <div className="flex-1 flex flex-col bg-black rounded-xl overflow-hidden relative group">
                 <video src={generatedVideoUrl} autoPlay loop muted playsInline controls className="w-full h-full object-contain" />
               </div>
             )}
 
-             {/* Error */}
              {step === AppStep.ERROR && (
               <div className="flex-1 flex flex-col items-center justify-center text-red-400 p-8 text-center">
                  <h3 className="text-xl font-bold mb-2">Generation Failed</h3>
@@ -461,11 +570,8 @@ const App: React.FC = () => {
             )}
           </div>
 
-          {/* Post-Completion Actions / Step 7 */}
-          {(step === AppStep.COMPLETE || step === AppStep.AWAITING_APPROVAL) && generatedImage && (
+          {(step === AppStep.COMPLETE || step === AppStep.AWAITING_APPROVAL) && activeTab === 'VISUAL' && (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              
-              {/* Feedback Loop */}
               <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
                  <h3 className="text-sm font-medium text-neon-blue mb-3 uppercase tracking-wider flex items-center">
                     <span className="w-2 h-2 bg-neon-blue rounded-full mr-2"></span>
@@ -489,7 +595,6 @@ const App: React.FC = () => {
                  </div>
               </div>
 
-              {/* Downloads & Reset */}
               <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 flex flex-col justify-between">
                    <div className="space-y-3">
                      <button onClick={reset} className="w-full py-2 bg-gray-800 hover:bg-gray-700 text-white rounded-lg border border-gray-700 text-sm">

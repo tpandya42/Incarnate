@@ -1,6 +1,6 @@
 
-import { GoogleGenAI, VideoGenerationReferenceImage, VideoGenerationReferenceType, Type } from "@google/genai";
-import { CritiqueResult } from "../types";
+import { GoogleGenAI, VideoGenerationReferenceImage, VideoGenerationReferenceType, Type, Modality } from "@google/genai";
+import { CritiqueResult, VoiceProfile, MouthData, Viseme } from "../types";
 
 export interface GeneratedImage {
   data: string;
@@ -13,6 +13,8 @@ const getAiClient = () => {
 
 // Helper for delays
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+// --- EXISTING AVATAR FUNCTIONS ---
 
 // 1. Optimize Prompt (Multimodal: Text + Optional User Image)
 export const optimizePrompt = async (
@@ -172,7 +174,7 @@ export const refinePrompt = async (
   return response.text?.trim() || currentPrompt;
 };
 
-// 4. Generate Image (Accepts reference image for direct conditioning)
+// 4. Generate Image
 export const generateAvatarImage = async (
   optimizedPrompt: string, 
   referenceImageBase64?: string
@@ -214,7 +216,7 @@ export const generateAvatarImage = async (
   throw new Error("No image data found in response");
 };
 
-// 5. Generate Video (With Retry Logic)
+// 5. Generate Video
 export const generateAvatarVideo = async (
   referenceImage: GeneratedImage,
   characterName: string,
@@ -222,17 +224,8 @@ export const generateAvatarVideo = async (
   scenario: string
 ): Promise<string> => {
   const ai = getAiClient();
-  const model = "veo-3.1-generate-preview";
-
-  const referenceImagesPayload: VideoGenerationReferenceImage[] = [
-    {
-      image: {
-        imageBytes: referenceImage.data,
-        mimeType: referenceImage.mimeType,
-      },
-      referenceType: VideoGenerationReferenceType.ASSET,
-    }
-  ];
+  // Using the supported Fast model instead of unavailable Veo 2.0
+  const model = "veo-3.1-fast-generate-preview";
 
   let prompt = "";
   
@@ -245,7 +238,6 @@ export const generateAvatarVideo = async (
     prompt = `Video game character showcase. 360-degree rotating camera view of the character in a ${scenario}. Third-person perspective, game engine style.`;
   }
 
-  // Retry Loop
   const MAX_RETRIES = 3;
   let lastError: any = null;
 
@@ -253,20 +245,23 @@ export const generateAvatarVideo = async (
     try {
       console.log(`Video generation attempt ${attempt}/${MAX_RETRIES}`);
       
+      // Use standard image parameter for Fast models
       let operation = await ai.models.generateVideos({
         model,
         prompt: prompt,
+        image: {
+          imageBytes: referenceImage.data,
+          mimeType: referenceImage.mimeType,
+        },
         config: {
           numberOfVideos: 1,
-          referenceImages: referenceImagesPayload,
           resolution: '720p',
           aspectRatio: '16:9'
         }
       });
 
-      // Poll for completion
       while (!operation.done) {
-        await delay(5000); // 5s polling interval
+        await delay(5000); 
         operation = await ai.operations.getVideosOperation({ operation });
         
         if (operation.metadata?.state === 'FAILED') {
@@ -287,18 +282,180 @@ export const generateAvatarVideo = async (
     } catch (err: any) {
       lastError = err;
       const isInternalError = err.message?.toLowerCase().includes('internal') || err.message?.toLowerCase().includes('server');
-      
-      // Only retry on server/internal errors or specific failure states
       if (attempt < MAX_RETRIES && isInternalError) {
         console.warn(`Video generation failed (Attempt ${attempt}), retrying in 4s...`, err);
-        await delay(4000); // Wait before retry
+        await delay(4000);
         continue;
       }
-      
-      // If it's a prompt safety error or max retries reached, break loop
       break; 
     }
   }
 
   throw lastError || new Error("Video generation failed after multiple attempts.");
+};
+
+// --- NEW VOICE STUDIO FUNCTIONS ---
+
+// Phase 1: Analyze Voice
+export const analyzeVoiceProfile = async (audioBase64: string): Promise<VoiceProfile> => {
+  const ai = getAiClient();
+  const model = "gemini-3-pro-preview";
+
+  const prompt = `
+    Analyze the attached voice sample. 
+    Extract the pitch range, speech pace, tone, and unique vocal traits.
+    Based on these traits, select the best matching TTS voice ID from this list: ['Puck', 'Charon', 'Kore', 'Fenrir', 'Zephyr'].
+    
+    - Puck: High energy, youthful
+    - Charon: Deep, authoritative
+    - Kore: Calm, feminine, soft
+    - Fenrir: Aggressive, rough
+    - Zephyr: Neutral, balanced, friendly
+
+    Return JSON matching the VoiceProfile interface.
+  `;
+
+  const response = await ai.models.generateContent({
+    model,
+    contents: [
+      { text: prompt },
+      {
+        inlineData: {
+          mimeType: "audio/wav", // Assuming WAV from recorder, or use generic
+          data: audioBase64
+        }
+      }
+    ],
+    config: {
+      responseMimeType: "application/json",
+      responseSchema: {
+        type: Type.OBJECT,
+        properties: {
+          pitch_range: { type: Type.OBJECT, properties: { min_hz: { type: Type.NUMBER }, max_hz: { type: Type.NUMBER } } },
+          speech_pace_wpm: { type: Type.NUMBER },
+          tone: { type: Type.STRING },
+          unique_traits: { type: Type.ARRAY, items: { type: Type.STRING } },
+          recommended_voice_id: { type: Type.STRING, enum: ['Puck', 'Charon', 'Kore', 'Fenrir', 'Zephyr'] },
+          confidence: { type: Type.NUMBER }
+        }
+      }
+    }
+  });
+
+  if (!response.text) throw new Error("Failed to analyze voice.");
+  return JSON.parse(response.text) as VoiceProfile;
+};
+
+// Phase 2: Synthesis & Visemes
+// We need two calls: one for audio, one for viseme timing (since TTS API doesn't return timestamps yet in this SDK version easily).
+export const generateSpeech = async (script: string, voiceName: string): Promise<string> => {
+  const ai = getAiClient();
+  const model = "gemini-2.5-flash-preview-tts";
+
+  const response = await ai.models.generateContent({
+    model,
+    contents: [{ parts: [{ text: script }] }],
+    config: {
+      responseModalities: [Modality.AUDIO],
+      speechConfig: {
+        voiceConfig: {
+          prebuiltVoiceConfig: { voiceName: voiceName },
+        },
+      },
+    },
+  });
+
+  const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+  if (!base64Audio) throw new Error("No audio generated");
+  return base64Audio;
+};
+
+export const generateVisemes = async (script: string, totalDurationSeconds: number): Promise<Viseme[]> => {
+  const ai = getAiClient();
+  const model = "gemini-3-pro-preview";
+
+  // Ask Gemini to estimate timing based on the script length
+  const prompt = `
+    Break down the following text script into a sequence of phonemes/visemes for lip-sync animation.
+    The total audio duration is approximately ${totalDurationSeconds} seconds.
+    
+    Script: "${script}"
+
+    Map each sound to one of these Viseme Shapes:
+    A: Wide open (ah) - openness 0.8
+    B: Closed lips (b, m, p) - openness 0.0
+    C: Partially open (ch, j) - openness 0.3
+    D: Mid-open (d, t, n) - openness 0.6
+    E: Front vowel (e, i) - openness 0.3
+    F: Labiodental (f, v) - openness 0.2
+    G: Back (g, k) - openness 0.4
+
+    Return a JSON array of Viseme objects with precise start_time and end_time (in seconds) that fit within the total duration.
+  `;
+
+  const response = await ai.models.generateContent({
+    model,
+    contents: prompt,
+    config: {
+      responseMimeType: "application/json",
+      responseSchema: {
+        type: Type.ARRAY,
+        items: {
+          type: Type.OBJECT,
+          properties: {
+            phoneme: { type: Type.STRING },
+            viseme_shape: { type: Type.STRING, enum: ['A', 'B', 'C', 'D', 'E', 'F', 'G'] },
+            start_time: { type: Type.NUMBER },
+            end_time: { type: Type.NUMBER },
+            openness: { type: Type.NUMBER }
+          }
+        }
+      }
+    }
+  });
+
+  if (!response.text) return [];
+  return JSON.parse(response.text) as Viseme[];
+};
+
+// Phase 3: Mouth Analysis
+export const analyzeMouthCoordinates = async (imageBase64: string): Promise<MouthData> => {
+  const ai = getAiClient();
+  const model = "gemini-3-pro-preview";
+
+  const prompt = `
+    Analyze the attached character image. 
+    Identify the exact location and dimensions of the character's mouth for a lip-sync overlay.
+    Return pixel coordinates assuming the image dimensions.
+    Also estimate the "max_open" ratio (0.0 to 1.0) suitable for this art style (e.g. anime might be smaller than realistic).
+  `;
+
+  const response = await ai.models.generateContent({
+    model,
+    contents: [
+      { text: prompt },
+      {
+        inlineData: {
+          mimeType: "image/png", 
+          data: imageBase64
+        }
+      }
+    ],
+    config: {
+      responseMimeType: "application/json",
+      responseSchema: {
+        type: Type.OBJECT,
+        properties: {
+          mouth_center: { type: Type.OBJECT, properties: { x: { type: Type.NUMBER }, y: { type: Type.NUMBER } } },
+          mouth_width_pixels: { type: Type.NUMBER },
+          mouth_height_pixels: { type: Type.NUMBER },
+          max_open: { type: Type.NUMBER },
+          character_type: { type: Type.STRING }
+        }
+      }
+    }
+  });
+
+  if (!response.text) throw new Error("Mouth analysis failed");
+  return JSON.parse(response.text) as MouthData;
 };

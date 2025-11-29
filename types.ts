@@ -31,3 +31,39 @@ export interface CritiqueResult {
   feedback: string;
   suggestions: string;
 }
+
+// --- Voice Studio Types ---
+
+export interface VoiceProfile {
+  pitch_range: { min_hz: number; max_hz: number };
+  speech_pace_wpm: number;
+  tone: string;
+  unique_traits: string[];
+  recommended_voice_id: 'Puck' | 'Charon' | 'Kore' | 'Fenrir' | 'Zephyr';
+  confidence: number;
+}
+
+export interface MouthData {
+  mouth_center: { x: number; y: number };
+  mouth_width_pixels: number;
+  mouth_height_pixels: number;
+  max_open: number;
+  character_type: string;
+}
+
+export interface Viseme {
+  phoneme: string;
+  viseme_shape: 'A' | 'B' | 'C' | 'D' | 'E' | 'F' | 'G';
+  start_time: number; // in seconds
+  end_time: number; // in seconds
+  openness: number; // 0.0 to 1.0
+}
+
+export interface VoiceSessionData {
+  userVoiceBase64?: string;
+  voiceProfile?: VoiceProfile;
+  script: string;
+  generatedAudioBase64?: string;
+  visemes?: Viseme[];
+  mouthData?: MouthData;
+}
