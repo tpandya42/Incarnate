@@ -1,85 +1,56 @@
-// Tripo3D API Service for 3D Model Generation
-
-// Use proxy in development to avoid CORS issues
-const TRIPO_API_BASE = '/tripo-api/v2/openapi';
-const TRIPO_API_KEY = 'tsk_-rD09s7E36EWNe37HAiyDQNu2KD_uEXU6hTrt-wPGWT';
-
-export interface TripoTaskResponse {
-  code: number;
-  data: {
-    task_id: string;
-  };
-}
-
-export interface TripoTaskStatus {
-  code: number;
-  data: {
-    task_id: string;
-    type: string;
-    status: 'queued' | 'running' | 'success' | 'failed' | 'banned' | 'expired' | 'cancelled' | 'unknown';
-    input: Record<string, any>;
-    output: {
-      model?: string;
-      base_model?: string;
-      pbr_model?: string;
-      rendered_image?: string;
-    };
-    progress: number;
-    create_time: number;
-  };
-}
-
-export interface TripoUploadResponse {
-  code: number;
-  data: {
-    image_token: string;
-  };
-}
+import { config } from '../config/index.js';
+import type {
+  TripoTaskResponse,
+  TripoTaskStatus,
+  TripoUploadResponse,
+  Model3DResult,
+} from '../types/index.js';
 
 // Helper for delays
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-/**
- * Upload an image to Tripo3D and get a file token
- */
-export const uploadImageToTripo = async (imageBase64: string, mimeType: string = 'image/png'): Promise<string> => {
-  console.log('[Tripo] Uploading image, size:', imageBase64.length, 'chars');
-  
-  // Convert base64 to blob
-  const byteCharacters = atob(imageBase64);
-  const byteNumbers = new Array(byteCharacters.length);
-  for (let i = 0; i < byteCharacters.length; i++) {
-    byteNumbers[i] = byteCharacters.charCodeAt(i);
-  }
-  const byteArray = new Uint8Array(byteNumbers);
-  const blob = new Blob([byteArray], { type: mimeType });
-  console.log('[Tripo] Blob size:', blob.size, 'bytes');
+// ============================================
+// Image Upload
+// ============================================
 
-  // Create form data
-  const formData = new FormData();
+export const uploadImageToTripo = async (
+  imageBase64: string,
+  mimeType: string = 'image/png'
+): Promise<string> => {
+  console.log('[Tripo] Uploading image, size:', imageBase64.length, 'chars');
+
+  // Convert base64 to buffer
+  const buffer = Buffer.from(imageBase64, 'base64');
+  console.log('[Tripo] Buffer size:', buffer.length, 'bytes');
+
+  // Create form data with native fetch (Node.js 18+)
   const extension = mimeType.split('/')[1] || 'png';
+  const blob = new Blob([buffer], { type: mimeType });
+  
+  const formData = new FormData();
   formData.append('file', blob, `avatar.${extension}`);
 
-  console.log('[Tripo] Making upload request to:', `${TRIPO_API_BASE}/upload`);
-  const response = await fetch(`${TRIPO_API_BASE}/upload`, {
+  console.log('[Tripo] Making upload request to:', `${config.tripoApiBase}/upload`);
+  
+  const response = await fetch(`${config.tripoApiBase}/upload`, {
     method: 'POST',
     headers: {
-      'Authorization': `Bearer ${TRIPO_API_KEY}`,
+      'Authorization': `Bearer ${config.tripoApiKey}`,
     },
     body: formData,
   });
 
   console.log('[Tripo] Upload response status:', response.status);
-  
+
   if (!response.ok) {
     const errorText = await response.text();
     console.error('[Tripo] Upload error:', errorText);
     throw new Error(`Upload failed: ${response.status} - ${errorText}`);
   }
 
-  const result: TripoUploadResponse = await response.json();
+  const result = await response.json() as TripoUploadResponse;
   console.log('[Tripo] Upload result:', result);
-  
+
   if (result.code !== 0) {
     throw new Error(`Upload error: code ${result.code}`);
   }
@@ -88,9 +59,10 @@ export const uploadImageToTripo = async (imageBase64: string, mimeType: string =
   return result.data.image_token;
 };
 
-/**
- * Start an image-to-model generation task
- */
+// ============================================
+// Task Creation
+// ============================================
+
 export const startImageToModelTask = async (
   imageToken: string,
   options: {
@@ -118,14 +90,14 @@ export const startImageToModelTask = async (
     pbr,
     auto_size: autoSize,
   };
-  
+
   console.log('[Tripo] Starting task with body:', JSON.stringify(requestBody, null, 2));
 
-  const response = await fetch(`${TRIPO_API_BASE}/task`, {
+  const response = await fetch(`${config.tripoApiBase}/task`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'Authorization': `Bearer ${TRIPO_API_KEY}`,
+      'Authorization': `Bearer ${config.tripoApiKey}`,
     },
     body: JSON.stringify(requestBody),
   });
@@ -138,9 +110,9 @@ export const startImageToModelTask = async (
     throw new Error(`Task creation failed: ${response.status} - ${errorText}`);
   }
 
-  const result: TripoTaskResponse = await response.json();
+  const result = await response.json() as TripoTaskResponse;
   console.log('[Tripo] Task creation result:', result);
-  
+
   if (result.code !== 0) {
     throw new Error(`Task creation error: code ${result.code}`);
   }
@@ -149,14 +121,15 @@ export const startImageToModelTask = async (
   return result.data.task_id;
 };
 
-/**
- * Get task status
- */
+// ============================================
+// Task Status
+// ============================================
+
 export const getTaskStatus = async (taskId: string): Promise<TripoTaskStatus['data']> => {
-  const response = await fetch(`${TRIPO_API_BASE}/task/${taskId}`, {
+  const response = await fetch(`${config.tripoApiBase}/task/${taskId}`, {
     method: 'GET',
     headers: {
-      'Authorization': `Bearer ${TRIPO_API_KEY}`,
+      'Authorization': `Bearer ${config.tripoApiKey}`,
     },
   });
 
@@ -166,9 +139,9 @@ export const getTaskStatus = async (taskId: string): Promise<TripoTaskStatus['da
     throw new Error(`Get task failed: ${response.status} - ${errorText}`);
   }
 
-  const result: TripoTaskStatus = await response.json();
+  const result = await response.json() as TripoTaskStatus;
   console.log('[Tripo] Task status:', result.data.status, 'progress:', result.data.progress);
-  
+
   if (result.code !== 0) {
     throw new Error(`Get task error: code ${result.code}`);
   }
@@ -176,9 +149,10 @@ export const getTaskStatus = async (taskId: string): Promise<TripoTaskStatus['da
   return result.data;
 };
 
-/**
- * Poll for task completion
- */
+// ============================================
+// Task Polling
+// ============================================
+
 export const waitForTaskCompletion = async (
   taskId: string,
   onProgress?: (progress: number, status: string) => void,
@@ -189,7 +163,7 @@ export const waitForTaskCompletion = async (
 
   while (Date.now() - startTime < maxWaitMs) {
     const status = await getTaskStatus(taskId);
-    
+
     if (onProgress) {
       onProgress(status.progress, status.status);
     }
@@ -208,44 +182,19 @@ export const waitForTaskCompletion = async (
   throw new Error('Task timed out');
 };
 
-/**
- * Download a file from URL and return as base64
- */
-export const downloadAsBase64 = async (url: string): Promise<string> => {
-  const response = await fetch(url);
-  if (!response.ok) {
-    throw new Error(`Download failed: ${response.status}`);
-  }
-  const blob = await response.blob();
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onloadend = () => {
-      const base64 = reader.result as string;
-      resolve(base64);
-    };
-    reader.onerror = reject;
-    reader.readAsDataURL(blob);
-  });
-};
+// ============================================
+// Complete 3D Model Generation Flow
+// ============================================
 
-/**
- * Complete flow: Generate 3D model from image
- * Returns blob URLs that won't expire (downloaded immediately)
- */
 export const generate3DModel = async (
   imageBase64: string,
   mimeType: string = 'image/png',
   onProgress?: (message: string, progress: number) => void
-): Promise<{
-  modelUrl: string;
-  modelBase64?: string;
-  pbrModelUrl?: string;
-  renderedImageUrl?: string;
-}> => {
+): Promise<Model3DResult> => {
   // Step 1: Upload image
   onProgress?.('Uploading image to Tripo3D...', 10);
   const imageToken = await uploadImageToTripo(imageBase64, mimeType);
-  
+
   // Step 2: Start generation task
   onProgress?.('Starting 3D model generation...', 20);
   const taskId = await startImageToModelTask(imageToken, {
@@ -265,42 +214,38 @@ export const generate3DModel = async (
     throw new Error('No model URL in response');
   }
 
-  const modelSourceUrl = result.output.pbr_model || result.output.model || '';
-  
-  // Step 4: Download the model immediately (URLs expire in 5 minutes)
-  onProgress?.('Downloading 3D model...', 92);
-  let modelBase64: string | undefined;
-  let localModelUrl = modelSourceUrl;
-  
-  try {
-    modelBase64 = await downloadAsBase64(modelSourceUrl);
-    // Create a blob URL from the downloaded data
-    const response = await fetch(modelBase64);
-    const blob = await response.blob();
-    localModelUrl = URL.createObjectURL(blob);
-    onProgress?.('3D model downloaded!', 98);
-  } catch (downloadErr) {
-    console.warn('Could not download model immediately, using direct URL:', downloadErr);
-    // Fall back to direct URL (may expire)
-  }
-
-  // Also download preview image if available
-  let localPreviewUrl = result.output.rendered_image;
-  if (result.output.rendered_image) {
-    try {
-      const previewBase64 = await downloadAsBase64(result.output.rendered_image);
-      const response = await fetch(previewBase64);
-      const blob = await response.blob();
-      localPreviewUrl = URL.createObjectURL(blob);
-    } catch (e) {
-      console.warn('Could not download preview image');
-    }
-  }
+  onProgress?.('3D model ready!', 100);
 
   return {
-    modelUrl: localModelUrl,
-    modelBase64,
+    taskId,
+    status: result.status,
+    modelUrl: result.output.pbr_model || result.output.model,
     pbrModelUrl: result.output.pbr_model,
-    renderedImageUrl: localPreviewUrl,
+    renderedImageUrl: result.output.rendered_image,
+    progress: 100,
   };
+};
+
+// ============================================
+// Download Helper (for model files)
+// ============================================
+
+export const downloadModelFile = async (url: string): Promise<Buffer> => {
+  const response = await fetch(url);
+  
+  if (!response.ok) {
+    throw new Error(`Download failed: ${response.status}`);
+  }
+  
+  const arrayBuffer = await response.arrayBuffer();
+  return Buffer.from(arrayBuffer);
+};
+
+// ============================================
+// Get Model as Base64
+// ============================================
+
+export const getModelAsBase64 = async (url: string): Promise<string> => {
+  const buffer = await downloadModelFile(url);
+  return buffer.toString('base64');
 };

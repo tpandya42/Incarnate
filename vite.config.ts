@@ -14,6 +14,10 @@ export default defineConfig(({ mode }) => {
             changeOrigin: true,
             rewrite: (path) => path.replace(/^\/tripo-api/, ''),
           },
+          '/api': {
+            target: 'http://localhost:8080',
+            changeOrigin: true,
+          },
         },
       },
       plugins: [react()],

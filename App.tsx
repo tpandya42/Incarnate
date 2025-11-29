@@ -24,6 +24,7 @@ const App: React.FC = () => {
   const [description, setDescription] = useState('');
   const [style, setStyle] = useState('Cyberpunk anime, neon lights, futuristic');
   const [referenceImage, setReferenceImage] = useState<string>('');
+  const [includeVideo, setIncludeVideo] = useState(false); // Video is optional to save credits
   
   // Generation State
   const [phase, setPhase] = useState<GenerationPhase>('idle');
@@ -96,44 +97,52 @@ const App: React.FC = () => {
       addLog('🖼️ Generating avatar image...', 'info');
       const image = await generateAvatarImage(optimizedPrompt, referenceImage || undefined);
       setAvatarImage(image);
-      setProgress(30);
+      setProgress(includeVideo ? 30 : 40);
       addLog('✅ Avatar image generated!', 'success');
 
-      // Phase 2: Generate Video
-      setPhase('generating-video');
-      addLog('🎬 Initializing video generation...', 'info');
-      
-      try {
-        const videoUri = await generateAvatarVideo(image, name, 'STUDIO', '');
-        addLog('📥 Downloading video...', 'info');
+      // Phase 2: Generate Video (Optional - only if checkbox is checked)
+      if (includeVideo) {
+        setPhase('generating-video');
+        addLog('🎬 Initializing video generation...', 'info');
         
-        const response = await fetch(`${videoUri}&key=${process.env.API_KEY}`);
-        if (response.ok) {
-          const blob = await response.blob();
-          const url = URL.createObjectURL(blob);
-          setVideoUrl(url);
-          addLog('✅ Video generated!', 'success');
-        } else {
-          addLog('⚠️ Video download failed, continuing...', 'warning');
+        try {
+          const videoUri = await generateAvatarVideo(image, name, 'STUDIO', '');
+          addLog('📥 Downloading video...', 'info');
+          
+          const response = await fetch(`${videoUri}&key=${process.env.API_KEY}`);
+          if (response.ok) {
+            const blob = await response.blob();
+            const url = URL.createObjectURL(blob);
+            setVideoUrl(url);
+            addLog('✅ Video generated!', 'success');
+          } else {
+            addLog('⚠️ Video download failed, continuing...', 'warning');
+          }
+        } catch (videoErr: any) {
+          addLog(`⚠️ Video generation skipped: ${videoErr.message}`, 'warning');
         }
-      } catch (videoErr: any) {
-        addLog(`⚠️ Video generation skipped: ${videoErr.message}`, 'warning');
+        setProgress(60);
+      } else {
+        addLog('⏭️ Video generation skipped (not selected)', 'info');
+        setProgress(40);
       }
-      setProgress(60);
 
       // Phase 3: Generate 3D Model
+      const baseProgress = includeVideo ? 60 : 40;
       setPhase('generating-3d');
       addLog('🧊 Starting 3D model generation...', 'info');
       addLog('🔄 Uploading avatar to Tripo3D...', 'info');
       try {
+        console.log('[3D Debug] Starting with image mimeType:', image.mimeType, 'data length:', image.data.length);
         const result = await generate3DModel(
           image.data,
           image.mimeType,
           (msg, prog) => {
             addLog(msg, 'info');
-            setProgress(60 + (prog * 0.4));
+            setProgress(baseProgress + (prog * (100 - baseProgress) / 100));
           }
         );
+        console.log('[3D Debug] Result:', result);
         setModel3DUrl(result.modelUrl);
         if (result.modelBase64) {
           setModel3DBase64(result.modelBase64);
@@ -143,7 +152,8 @@ const App: React.FC = () => {
         }
         addLog('✅ 3D model generated!', 'success');
       } catch (err3D: any) {
-        addLog(`⚠️ 3D generation failed: ${err3D.message}`, 'warning');
+        console.error('[3D Debug] Error:', err3D);
+        addLog(`❌ 3D generation failed: ${err3D.message}`, 'error');
       }
 
       setProgress(100);
@@ -305,6 +315,25 @@ const App: React.FC = () => {
                   </div>
                 </div>
 
+                {/* Video Generation Toggle */}
+                <div className="flex items-center gap-3 p-3 bg-black/20 rounded-xl border border-white/5">
+                  <input
+                    type="checkbox"
+                    id="includeVideo"
+                    checked={includeVideo}
+                    onChange={(e) => setIncludeVideo(e.target.checked)}
+                    disabled={isGenerating}
+                    className="w-5 h-5 rounded border-gray-600 bg-black/40 text-purple-500 focus:ring-purple-500/25 focus:ring-offset-0"
+                  />
+                  <label htmlFor="includeVideo" className="flex-1 cursor-pointer">
+                    <span className="text-sm text-gray-300">Include 360° Video</span>
+                    <p className="text-xs text-gray-500 mt-0.5">Uses additional API credits • Adds ~1 min to generation</p>
+                  </label>
+                  <span className="px-2 py-0.5 text-xs rounded bg-yellow-500/10 text-yellow-400 border border-yellow-500/20">
+                    Optional
+                  </span>
+                </div>
+
                 {error && (
                   <div className="bg-red-500/10 border border-red-500/20 rounded-xl p-3 text-red-400 text-sm">
                     {error}
@@ -332,8 +361,10 @@ const App: React.FC = () => {
                     </span>
                   ) : phase === 'complete' || phase === 'error' ? (
                     'Start New Generation'
-                  ) : (
+                  ) : includeVideo ? (
                     'Generate Avatar + Video + 3D Model'
+                  ) : (
+                    'Generate Avatar + 3D Model'
                   )}
                 </button>
               </div>
