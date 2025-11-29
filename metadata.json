@@ -1,0 +1,7 @@
+{
+  "name": "Avatar Crafter 360",
+  "description": "Generate professional character avatars and 360-degree video showcases using Gemini 3 Pro and Veo 3.1.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
