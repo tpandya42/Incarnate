@@ -17,6 +17,15 @@ export const ApiKeySelector: React.FC<ApiKeySelectorProps> = ({ onReady }) => {
   const [checking, setChecking] = useState(true);
 
   const checkKey = async () => {
+    // First check if we have an API key from environment (local development)
+    if (process.env.API_KEY || process.env.GEMINI_API_KEY) {
+      setHasKey(true);
+      onReady();
+      setChecking(false);
+      return;
+    }
+    
+    // Fall back to AI Studio's key selector (for hosted environment)
     if (window.aistudio) {
       const selected = await window.aistudio.hasSelectedApiKey();
       setHasKey(selected);

@@ -8,6 +8,13 @@ export default defineConfig(({ mode }) => {
       server: {
         port: 3000,
         host: '0.0.0.0',
+        proxy: {
+          '/tripo-api': {
+            target: 'https://api.tripo3d.ai',
+            changeOrigin: true,
+            rewrite: (path) => path.replace(/^\/tripo-api/, ''),
+          },
+        },
       },
       plugins: [react()],
       define: {

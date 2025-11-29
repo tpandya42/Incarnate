@@ -67,3 +67,14 @@ export interface VoiceSessionData {
   visemes?: Viseme[];
   mouthData?: MouthData;
 }
+
+// --- 3D Studio Types ---
+
+export interface Model3DData {
+  modelUrl?: string;
+  pbrModelUrl?: string;
+  renderedImageUrl?: string;
+  status: '3D_IDLE' | '3D_GENERATING' | '3D_COMPLETE' | '3D_ERROR';
+  progress: number;
+  errorMessage?: string;
+}

@@ -40,7 +40,7 @@ export const optimizePrompt = async (
 
   const textPrompt = `
     You are an expert concept artist and prompt engineer.
-    I need to generate a character reference sheet for a video generation model.
+    I need to generate a single character image optimized for 3D model generation.
     
     Character Name: ${name}
     Description: ${description}
@@ -49,16 +49,18 @@ export const optimizePrompt = async (
 
     ${userImageBase64 ? "CRITICAL INSTRUCTION: The user has provided a reference image containing a specific face/person. The output character MUST bear a strong facial resemblance to this person (maintain likeness, ethnicity, and facial structure) while adapting them into the requested Art Style and costume." : ""}
 
-    Task: Write a highly detailed image generation prompt. 
-    The prompt must describe a "Character Turnaround Sheet" featuring the character in a full-body view. 
-    It should include a front view, side view, and back view arranged horizontally.
+    Task: Write a highly detailed image generation prompt for a SINGLE character portrait.
     
-    Key requirements for the output prompt:
-    ${backgroundInstruction}
-    2. It must specify high fidelity, perfect lighting, 4k resolution, and clear details.
-    3. Focus heavily on the visual aesthetic defined by the style.
-    4. Ensure the character design is consistent across all views.
-    ${userImageBase64 ? "5. Emphasize that the face must match the reference image provided." : ""}
+    CRITICAL REQUIREMENTS for the output prompt:
+    1. Single character only - ONE person in the entire image
+    2. Front-facing view, full body visible from head to feet
+    3. T-pose or A-pose with arms slightly away from the body (for 3D rigging)
+    4. Plain solid color background (white, light gray, or dark gray) - NO complex backgrounds
+    5. High fidelity, perfect even lighting, 4k resolution, clear details
+    6. Clean silhouette with well-defined edges
+    7. No text, no watermarks, no UI elements, no multiple views
+    8. Focus heavily on the visual aesthetic defined by the style
+    ${userImageBase64 ? "9. The face must match the reference image provided." : ""}
 
     Return ONLY the raw prompt text, no markdown formatting or explanations.
   `;
@@ -198,7 +200,69 @@ export const generateAvatarImage = async (
     contents: contents,
     config: {
       imageConfig: {
-        aspectRatio: "16:9", 
+        aspectRatio: "1:1",  // Square for 3D model generation
+        imageSize: "2K",   
+      }
+    }
+  });
+
+  for (const part of response.candidates?.[0]?.content?.parts || []) {
+    if (part.inlineData) {
+      return {
+        data: part.inlineData.data,
+        mimeType: part.inlineData.mimeType || 'image/png'
+      };
+    }
+  }
+
+  throw new Error("No image data found in response");
+};
+
+// 4b. Generate Clean Single-View Image for 3D conversion (DEPRECATED - now using main generateAvatarImage)
+export const generateClean3DReadyImage = async (
+  characterDescription: string,
+  style: string,
+  referenceImageBase64?: string
+): Promise<GeneratedImage> => {
+  const ai = getAiClient();
+  const model = "gemini-3-pro-image-preview";
+
+  const prompt = `
+    Generate a single, clean character portrait optimized for 3D model generation.
+    
+    Character: ${characterDescription}
+    Style: ${style}
+    
+    CRITICAL REQUIREMENTS:
+    - Single character only, front-facing view
+    - Full body visible from head to feet
+    - T-pose or A-pose with arms slightly away from body
+    - Plain solid color background (white, light gray, or neutral)
+    - No text, no watermarks, no UI elements
+    - High detail on the character
+    - Clean silhouette with clear edges
+    - Consistent lighting from front
+    - 4K quality, photorealistic details
+    ${referenceImageBase64 ? "- Character should resemble the reference image provided" : ""}
+  `;
+
+  const contents: any[] = [{ text: prompt }];
+
+  if (referenceImageBase64) {
+    contents.push({
+      inlineData: {
+        mimeType: 'image/jpeg',
+        data: referenceImageBase64
+      }
+    });
+  }
+
+  const response = await ai.models.generateContent({
+    model,
+    contents: contents,
+    config: {
+      imageConfig: {
+        aspectRatio: "1:1", 
         imageSize: "2K",   
       }
     }
@@ -274,8 +338,16 @@ export const generateAvatarVideo = async (
         throw new Error(`Veo Operation Error: ${operation.error.message}`);
       }
 
-      const downloadLink = operation.response?.generatedVideos?.[0]?.video?.uri;
-      if (!downloadLink) throw new Error("Video URI not found in response");
+      // Try multiple paths to find the video URL
+      const generatedVideo = operation.response?.generatedVideos?.[0] as any;
+      const downloadLink = generatedVideo?.video?.uri || 
+                          generatedVideo?.uri ||
+                          (operation.response as any)?.videos?.[0]?.uri;
+      
+      if (!downloadLink) {
+        console.error("Full Veo response:", JSON.stringify(operation.response, null, 2));
+        throw new Error("Video URI not found in response");
+      }
 
       return downloadLink;
 

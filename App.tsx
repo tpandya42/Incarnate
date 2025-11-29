@@ -1,620 +1,466 @@
-
 import React, { useState, useEffect, useRef } from 'react';
-import { ApiKeySelector } from './components/ApiKeySelector';
-import { LoadingOverlay } from './components/LoadingOverlay';
-import { ImageUpload } from './components/ImageUpload';
-import { AudioRecorder } from './components/AudioRecorder';
-import { LipsyncPreview } from './components/LipsyncPreview';
 import { 
   optimizePrompt, 
   generateAvatarImage, 
   generateAvatarVideo, 
   critiqueGeneratedImage,
   refinePrompt,
-  analyzeVoiceProfile,
-  generateSpeech,
-  generateVisemes,
-  analyzeMouthCoordinates,
   GeneratedImage 
 } from './services/geminiService';
-import { AppStep, AvatarFormData, GenerationLog, CritiqueResult, VoiceSessionData } from './types';
+import { generate3DModel } from './services/tripoService';
 
-const MAX_REFINEMENT_LOOPS = 3; 
-const QUALITY_THRESHOLD = 85;
+// Types
+interface GenerationLog {
+  timestamp: string;
+  message: string;
+  type: 'info' | 'success' | 'warning' | 'error';
+}
+
+type GenerationPhase = 'idle' | 'generating-image' | 'generating-video' | 'generating-3d' | 'complete' | 'error';
 
 const App: React.FC = () => {
-  const [isKeyReady, setIsKeyReady] = useState(false);
-  const [activeTab, setActiveTab] = useState<'VISUAL' | 'VOICE'>('VISUAL');
+  // Form State
+  const [name, setName] = useState('');
+  const [description, setDescription] = useState('');
+  const [style, setStyle] = useState('Cyberpunk anime, neon lights, futuristic');
+  const [referenceImage, setReferenceImage] = useState<string>('');
   
-  // Visual Studio State
-  const [step, setStep] = useState<AppStep>(AppStep.INPUT);
-  const [formData, setFormData] = useState<AvatarFormData>({
-    name: '',
-    description: '',
-    style: 'Cyberpunk 2077, High Tech, Neon',
-    scenario: 'Standing in a futuristic laboratory',
-    userImage: '',
-    backgroundMode: 'STUDIO'
-  });
-  const [generatedPrompt, setGeneratedPrompt] = useState<string>('');
-  const [generatedImage, setGeneratedImage] = useState<GeneratedImage | null>(null);
-  const [generatedVideoUrl, setGeneratedVideoUrl] = useState<string | null>(null);
+  // Generation State
+  const [phase, setPhase] = useState<GenerationPhase>('idle');
+  const [progress, setProgress] = useState(0);
   const [logs, setLogs] = useState<GenerationLog[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const [critique, setCritique] = useState<CritiqueResult | null>(null);
-  const [loopCount, setLoopCount] = useState(0);
-  const [userFeedback, setUserFeedback] = useState('');
-
-  // Voice Studio State
-  const [voiceData, setVoiceData] = useState<VoiceSessionData>({ script: "Hello! I am ready to explore this world." });
-  const [isVoiceProcessing, setIsVoiceProcessing] = useState(false);
-
+  
+  // Output State
+  const [avatarImage, setAvatarImage] = useState<GeneratedImage | null>(null);
+  const [videoUrl, setVideoUrl] = useState<string | null>(null);
+  const [model3DUrl, setModel3DUrl] = useState<string | null>(null);
+  const [model3DPreview, setModel3DPreview] = useState<string | null>(null);
+  
   const logsEndRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     logsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [logs]);
 
-  const addLog = (message: string, type: 'info' | 'success' | 'warning' | 'error' = 'info') => {
-    setLogs(prev => [...prev, { timestamp: new Date().toLocaleTimeString(), message, type }]);
+  const addLog = (message: string, type: GenerationLog['type'] = 'info') => {
+    setLogs(prev => [...prev, { 
+      timestamp: new Date().toLocaleTimeString(), 
+      message, 
+      type 
+    }]);
   };
 
-  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => {
-    const { name, value } = e.target;
-    setFormData(prev => ({ ...prev, [name]: value }));
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        const base64 = (reader.result as string).split(',')[1];
+        setReferenceImage(base64);
+      };
+      reader.readAsDataURL(file);
+    }
   };
 
-  const handleImageSelected = (base64: string) => {
-    setFormData(prev => ({ ...prev, userImage: base64 }));
-  };
+  const generateAll = async () => {
+    if (!name.trim() || !description.trim()) {
+      setError('Please enter a name and description');
+      return;
+    }
 
-  // --- Visual Logic ---
-  const executeGenerationLoop = async (initialPrompt?: string, initialFeedback?: string) => {
     setError(null);
-    setGeneratedVideoUrl(null);
-    if (!initialPrompt) setLogs([]); 
-    setLoopCount(0);
-    setCritique(null);
+    setLogs([]);
+    setPhase('generating-image');
+    setProgress(0);
+    setAvatarImage(null);
+    setVideoUrl(null);
+    setModel3DUrl(null);
 
     try {
-      let currentPrompt = initialPrompt || '';
-
-      if (!currentPrompt) {
-        setStep(AppStep.OPTIMIZING_PROMPT);
-        addLog(`Initializing Avatar Agent...`);
-        addLog(`Analyzing ${formData.userImage ? 'multimodal ' : ''}input for ${formData.name}...`);
-        
-        currentPrompt = await optimizePrompt(
-          formData.name, 
-          formData.description, 
-          formData.style, 
-          formData.scenario,
-          formData.backgroundMode,
-          formData.userImage
-        );
-        
-        setGeneratedPrompt(currentPrompt);
-        addLog("Visual blueprint constructed.", 'success');
-      } else if (initialFeedback) {
-        addLog(`Applying user feedback: "${initialFeedback}"`, 'warning');
-        setStep(AppStep.REFINING);
-        const mockCritique: CritiqueResult = { score: 0, feedback: "User Feedback Loop", suggestions: initialFeedback };
-        currentPrompt = await refinePrompt(currentPrompt, mockCritique, initialFeedback);
-        setGeneratedPrompt(currentPrompt);
-      }
-
-      setStep(AppStep.GENERATING_IMAGE);
-      addLog("Generating Concept (V1)...");
-      let currentImage = await generateAvatarImage(currentPrompt, formData.userImage);
-      setGeneratedImage(currentImage);
-      addLog("Concept V1 generated.", 'info');
-
-      let loops = 0;
-      let bestImage = currentImage;
-      let bestScore = 0;
-      let isSatisfied = false;
-
-      while (loops < MAX_REFINEMENT_LOOPS && !isSatisfied) {
-        setStep(AppStep.CRITIQUING);
-        addLog(`Agent is critiquing concept (Cycle ${loops + 1})...`, 'warning');
-        
-        const critiqueResult: CritiqueResult = await critiqueGeneratedImage(formData.description, currentImage);
-        setCritique(critiqueResult);
-        addLog(`Quality Score: ${critiqueResult.score}/100`, critiqueResult.score > QUALITY_THRESHOLD ? 'success' : 'warning');
-        addLog(`Critique: ${critiqueResult.feedback}`);
-
-        if (critiqueResult.score > bestScore) {
-          bestScore = critiqueResult.score;
-          bestImage = currentImage;
-        }
-
-        if (critiqueResult.score >= QUALITY_THRESHOLD) {
-          isSatisfied = true;
-          addLog("Quality threshold met (>85%).", 'success');
-        } else {
-          setStep(AppStep.REFINING);
-          addLog("Refining prompt based on critique...", 'info');
-          currentPrompt = await refinePrompt(currentPrompt, critiqueResult);
-          setGeneratedPrompt(currentPrompt);
-          
-          setStep(AppStep.GENERATING_IMAGE);
-          addLog(`Regenerating Concept (V${loops + 2})...`);
-          const nextImage = await generateAvatarImage(currentPrompt, formData.userImage);
-          currentImage = nextImage;
-          setGeneratedImage(currentImage);
-
-          loops++;
-          setLoopCount(loops);
-        }
-      }
-
-      if (currentImage !== bestImage) {
-        addLog("Restoring best performing version...", 'success');
-        setGeneratedImage(bestImage);
-        currentImage = bestImage;
-      }
-
-      if (!isSatisfied) {
-        addLog("Max refinement loops reached.", 'warning');
-        setStep(AppStep.AWAITING_APPROVAL);
-        return; 
-      }
+      // Phase 1: Generate Avatar Image
+      addLog('🎨 Starting avatar generation...', 'info');
+      setProgress(5);
       
-      await startVideoGeneration(currentImage);
+      addLog('📝 Optimizing prompt with AI...', 'info');
+      const optimizedPrompt = await optimizePrompt(
+        name, description, style, 
+        'Standing in a futuristic environment',
+        'STUDIO',
+        referenceImage || undefined
+      );
+      setProgress(15);
+      addLog('✅ Prompt optimized', 'success');
+
+      addLog('🖼️ Generating avatar image...', 'info');
+      const image = await generateAvatarImage(optimizedPrompt, referenceImage || undefined);
+      setAvatarImage(image);
+      setProgress(30);
+      addLog('✅ Avatar image generated!', 'success');
+
+      // Phase 2: Generate Video
+      setPhase('generating-video');
+      addLog('🎬 Initializing video generation...', 'info');
+      
+      try {
+        const videoUri = await generateAvatarVideo(image, name, 'STUDIO', '');
+        addLog('📥 Downloading video...', 'info');
+        
+        const response = await fetch(`${videoUri}&key=${process.env.API_KEY}`);
+        if (response.ok) {
+          const blob = await response.blob();
+          const url = URL.createObjectURL(blob);
+          setVideoUrl(url);
+          addLog('✅ Video generated!', 'success');
+        } else {
+          addLog('⚠️ Video download failed, continuing...', 'warning');
+        }
+      } catch (videoErr: any) {
+        addLog(`⚠️ Video generation skipped: ${videoErr.message}`, 'warning');
+      }
+      setProgress(60);
+
+      // Phase 3: Generate 3D Model
+      setPhase('generating-3d');
+      addLog('🧊 Starting 3D model generation...', 'info');
+      addLog('🔄 Uploading avatar to Tripo3D...', 'info');
+      try {
+        const result = await generate3DModel(
+          image.data,
+          image.mimeType,
+          (msg, prog) => {
+            addLog(msg, 'info');
+            setProgress(60 + (prog * 0.4));
+          }
+        );
+        setModel3DUrl(result.modelUrl);
+        if (result.modelBase64) {
+          setModel3DBase64(result.modelBase64);
+        }
+        if (result.renderedImageUrl) {
+          setModel3DPreview(result.renderedImageUrl);
+        }
+        addLog('✅ 3D model generated!', 'success');
+      } catch (err3D: any) {
+        addLog(`⚠️ 3D generation failed: ${err3D.message}`, 'warning');
+      }
+
+      setProgress(100);
+      setPhase('complete');
+      addLog('🎉 All assets ready!', 'success');
 
     } catch (err: any) {
       console.error(err);
-      setError(err.message || "An unexpected error occurred");
-      setStep(AppStep.ERROR);
-      addLog(`Error: ${err.message}`, 'error');
-    }
-  };
-
-  const startVideoGeneration = async (image: GeneratedImage) => {
-    try {
-      setStep(AppStep.GENERATING_VIDEO);
-      addLog("Initializing Veo 3.1 360-degree engine...");
-      
-      const videoUri = await generateAvatarVideo(image, formData.name, formData.backgroundMode, formData.scenario);
-      addLog("Video generated. Fetching stream...");
-      
-      const response = await fetch(`${videoUri}&key=${process.env.API_KEY}`);
-      if (!response.ok) throw new Error("Video download failed");
-      
-      const blob = await response.blob();
-      const videoObjectUrl = URL.createObjectURL(blob);
-      
-      setGeneratedVideoUrl(videoObjectUrl);
-      addLog("Final asset ready.", 'success');
-      setStep(AppStep.COMPLETE);
-    } catch (err: any) {
       setError(err.message);
-      setStep(AppStep.ERROR);
-      addLog(`Video Error: ${err.message}`, 'error');
+      setPhase('error');
+      addLog(`❌ Error: ${err.message}`, 'error');
     }
   };
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    await executeGenerationLoop();
-  };
+  // Store the model base64 for reliable downloads
+  const [model3DBase64, setModel3DBase64] = useState<string | null>(null);
 
-  const handleUserRefine = async () => {
-    if (!userFeedback.trim()) return;
-    await executeGenerationLoop(generatedPrompt, userFeedback);
-    setUserFeedback('');
-  };
-
-  const handleApprove = async () => {
-    if (generatedImage) {
-      await startVideoGeneration(generatedImage);
+  const download3DModel = () => {
+    if (!model3DBase64 && !model3DUrl) return;
+    try {
+      const a = document.createElement('a');
+      // Use base64 data URL if available, otherwise use blob URL
+      a.href = model3DBase64 || model3DUrl!;
+      a.download = `${name || 'avatar'}-3d-model.glb`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    } catch (e) {
+      console.error('Download failed:', e);
+      addLog('Download failed - try right-click and save', 'error');
     }
   };
 
   const reset = () => {
-    setStep(AppStep.INPUT);
-    setGeneratedImage(null);
-    if (generatedVideoUrl) URL.revokeObjectURL(generatedVideoUrl);
-    setGeneratedVideoUrl(null);
-    setGeneratedPrompt('');
-    setCritique(null);
+    setPhase('idle');
+    setProgress(0);
+    setLogs([]);
     setError(null);
-    setUserFeedback('');
-    setVoiceData({ script: voiceData.script }); // Keep script
+    setAvatarImage(null);
+    if (videoUrl) URL.revokeObjectURL(videoUrl);
+    setVideoUrl(null);
+    setModel3DUrl(null);
+    setModel3DPreview(null);
+    setModel3DBase64(null);
   };
 
-  // --- Voice Logic ---
-  const handleVoiceRecording = async (base64: string) => {
-    setVoiceData(prev => ({ ...prev, userVoiceBase64: base64 }));
-    setIsVoiceProcessing(true);
-    addLog("Analyzing voice profile...", 'info');
-    try {
-      const profile = await analyzeVoiceProfile(base64);
-      setVoiceData(prev => ({ ...prev, voiceProfile: profile }));
-      addLog(`Voice Profile: ${profile.tone}, ${profile.speech_pace_wpm}wpm. Matched to: ${profile.recommended_voice_id}`, 'success');
-    } catch (e: any) {
-      addLog(`Voice Analysis Failed: ${e.message}`, 'error');
-    } finally {
-      setIsVoiceProcessing(false);
-    }
-  };
-
-  const handleGenerateLipsync = async () => {
-    if (!voiceData.voiceProfile || !voiceData.script || !generatedImage) {
-      addLog("Missing voice profile, script, or avatar image.", 'error');
-      return;
-    }
-    
-    setIsVoiceProcessing(true);
-    try {
-      // 1. Analyze Mouth
-      if (!voiceData.mouthData) {
-        addLog("Detecting mouth coordinates...", 'info');
-        const mouthData = await analyzeMouthCoordinates(generatedImage.data);
-        setVoiceData(prev => ({ ...prev, mouthData }));
-      }
-
-      // 2. Generate Audio
-      addLog("Synthesizing speech...", 'info');
-      const audio = await generateSpeech(voiceData.script, voiceData.voiceProfile.recommended_voice_id);
-      
-      // 3. Generate Visemes
-      // Estimate duration: approx 150 words per minute -> 2.5 words per sec
-      const wordCount = voiceData.script.split(' ').length;
-      const approxDuration = wordCount / (voiceData.voiceProfile.speech_pace_wpm / 60);
-      
-      addLog("Calculating lipsync animation...", 'info');
-      const visemes = await generateVisemes(voiceData.script, approxDuration);
-
-      setVoiceData(prev => ({ ...prev, generatedAudioBase64: audio, visemes }));
-      addLog("Lipsync Animation Ready!", 'success');
-
-    } catch (e: any) {
-      addLog(`Lipsync Failed: ${e.message}`, 'error');
-    } finally {
-      setIsVoiceProcessing(false);
-    }
-  };
+  const isGenerating = phase !== 'idle' && phase !== 'complete' && phase !== 'error';
 
   return (
-    <div className="min-h-screen bg-gray-950 text-gray-100 flex flex-col font-sans selection:bg-neon-purple selection:text-white">
-      <ApiKeySelector onReady={() => setIsKeyReady(true)} />
-      
-      <header className="border-b border-gray-800 bg-gray-900/50 backdrop-blur-md sticky top-0 z-30">
-        <div className="max-w-7xl mx-auto px-4 py-4 flex items-center justify-between">
-          <div className="flex items-center space-x-3">
-            <div className="w-10 h-10 bg-gradient-to-br from-neon-blue to-neon-purple rounded-lg shadow-lg shadow-neon-blue/20 flex items-center justify-center">
-               <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-6 h-6 text-white">
-                <path d="M16.5 7.5h-9v9h9v-9z" opacity="0.3" />
-                <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm0-14c-3.31 0-6 2.69-6 6s2.69 6 6 6 6-2.69 6-6-2.69-6-6-6zm0 10c-2.21 0-4-1.79-4-4s1.79-4 4-4 4 1.79 4 4-1.79 4-4 4z" />
+    <div className="min-h-screen bg-[#0a0a0f] text-white overflow-hidden">
+      {/* Animated Background */}
+      <div className="fixed inset-0 overflow-hidden pointer-events-none">
+        <div className="absolute top-1/4 -left-1/4 w-[600px] h-[600px] bg-purple-500/10 rounded-full blur-[128px] animate-pulse"></div>
+        <div className="absolute bottom-1/4 -right-1/4 w-[600px] h-[600px] bg-cyan-500/10 rounded-full blur-[128px] animate-pulse" style={{animationDelay: '1s'}}></div>
+        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[800px] h-[800px] bg-blue-500/5 rounded-full blur-[128px]"></div>
+      </div>
+
+      {/* Header */}
+      <header className="relative z-10 border-b border-white/5 backdrop-blur-xl bg-black/20">
+        <div className="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-cyan-400 to-purple-500 flex items-center justify-center shadow-lg shadow-purple-500/25">
+              <svg className="w-6 h-6 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14 10l-2 1m0 0l-2-1m2 1v2.5M20 7l-2 1m2-1l-2-1m2 1v2.5M14 4l-2-1-2 1M4 7l2-1M4 7l2 1M4 7v2.5M12 21l-2-1m2 1l2-1m-2 1v-2.5M6 18l-2-1v-2.5M18 18l2-1v-2.5" />
               </svg>
             </div>
-            <h1 className="text-2xl font-bold tracking-tight bg-clip-text text-transparent bg-gradient-to-r from-white to-gray-400">
-              Avatar<span className="text-neon-blue">Crafter</span> 360
-            </h1>
+            <div>
+              <h1 className="text-xl font-bold bg-gradient-to-r from-white to-gray-400 bg-clip-text text-transparent">
+                Incarnate
+              </h1>
+              <p className="text-xs text-gray-500">AI Avatar & 3D Model Generator</p>
+            </div>
           </div>
           
-          <div className="flex space-x-4 bg-gray-900 rounded-full p-1 border border-gray-800">
-            <button 
-              onClick={() => setActiveTab('VISUAL')}
-              className={`px-4 py-1.5 rounded-full text-xs font-bold transition-all ${activeTab === 'VISUAL' ? 'bg-neon-blue text-white shadow-lg shadow-neon-blue/20' : 'text-gray-400 hover:text-white'}`}
-            >
-              Visual Studio
-            </button>
-            <button 
-              onClick={() => setActiveTab('VOICE')}
-              disabled={!generatedImage}
-              className={`px-4 py-1.5 rounded-full text-xs font-bold transition-all ${activeTab === 'VOICE' ? 'bg-neon-purple text-white shadow-lg shadow-neon-purple/20' : 'text-gray-400 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed'}`}
-            >
-              Voice Studio
-            </button>
+          <div className="flex items-center gap-2 text-xs">
+            <span className="px-2 py-1 rounded-full bg-cyan-500/10 text-cyan-400 border border-cyan-500/20">Gemini 3</span>
+            <span className="px-2 py-1 rounded-full bg-purple-500/10 text-purple-400 border border-purple-500/20">Veo 3.1</span>
+            <span className="px-2 py-1 rounded-full bg-green-500/10 text-green-400 border border-green-500/20">Tripo3D</span>
           </div>
         </div>
       </header>
 
-      <main className="flex-grow max-w-7xl mx-auto w-full px-4 py-8 grid grid-cols-1 lg:grid-cols-12 gap-8">
-        
-        {/* LEFT PANEL: INPUTS */}
-        <div className="lg:col-span-4 space-y-6">
-          <div className="bg-gray-900 border border-gray-800 rounded-2xl p-6 shadow-xl">
-            {activeTab === 'VISUAL' ? (
-              <>
-                <h2 className="text-xl font-semibold mb-6 flex items-center text-white">
-                  <span className="w-2 h-8 bg-neon-blue rounded-full mr-3"></span>
-                  Character Design
-                </h2>
-                <form onSubmit={handleSubmit} className="space-y-5">
-                  <div>
-                    <label className="block text-sm font-medium text-gray-400 mb-1">Name</label>
-                    <input 
-                      type="text" name="name" value={formData.name} onChange={handleInputChange}
-                      disabled={step !== AppStep.INPUT && step !== AppStep.ERROR}
-                      className="w-full bg-gray-850 border border-gray-700 rounded-lg px-4 py-3 text-white focus:outline-none focus:border-neon-blue transition-all"
-                      required
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-400 mb-1">Description</label>
-                    <textarea 
-                      name="description" value={formData.description} onChange={handleInputChange}
-                      disabled={step !== AppStep.INPUT && step !== AppStep.ERROR}
-                      rows={3}
-                      className="w-full bg-gray-850 border border-gray-700 rounded-lg px-4 py-3 text-white focus:outline-none focus:border-neon-blue transition-all resize-none"
-                      required
-                    />
-                  </div>
-                  <ImageUpload onImageSelected={handleImageSelected} selectedImage={formData.userImage} />
-                  <div className="grid grid-cols-2 gap-4">
-                    <div>
-                      <label className="block text-sm font-medium text-gray-400 mb-1">Style</label>
-                      <input 
-                        type="text" name="style" value={formData.style} onChange={handleInputChange}
-                        disabled={step !== AppStep.INPUT && step !== AppStep.ERROR}
-                        className="w-full bg-gray-850 border border-gray-700 rounded-lg px-4 py-3 text-white text-sm"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-sm font-medium text-gray-400 mb-1">Scenario</label>
-                      <input 
-                        type="text" name="scenario" value={formData.scenario} onChange={handleInputChange}
-                        disabled={step !== AppStep.INPUT && step !== AppStep.ERROR}
-                        className="w-full bg-gray-850 border border-gray-700 rounded-lg px-4 py-3 text-white text-sm"
-                      />
-                    </div>
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-400 mb-1">Background Mode</label>
-                    <select
-                      name="backgroundMode"
-                      value={formData.backgroundMode}
-                      onChange={handleInputChange}
-                      disabled={step !== AppStep.INPUT && step !== AppStep.ERROR}
-                      className="w-full bg-gray-850 border border-gray-700 rounded-lg px-4 py-3 text-white focus:outline-none focus:border-neon-blue transition-all text-sm appearance-none"
-                    >
-                      <option value="STUDIO">Studio (Neutral Background)</option>
-                      <option value="IMMERSIVE">Immersive (In Scenario)</option>
-                      <option value="GAMEPLAY">Gameplay (Game Screenshot)</option>
-                    </select>
-                  </div>
+      {/* Main Content */}
+      <main className="relative z-10 max-w-7xl mx-auto px-6 py-8">
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+          
+          {/* Left Panel - Input */}
+          <div className="space-y-6">
+            <div className="bg-white/[0.02] backdrop-blur-xl border border-white/5 rounded-2xl p-6">
+              <h2 className="text-lg font-semibold mb-6 flex items-center gap-2">
+                <span className="w-2 h-6 bg-gradient-to-b from-cyan-400 to-purple-500 rounded-full"></span>
+                Create Your Avatar
+              </h2>
 
-                  {step === AppStep.INPUT || step === AppStep.ERROR ? (
-                    <button 
-                      type="submit" 
-                      disabled={!isKeyReady}
-                      className={`w-full py-4 rounded-lg font-bold text-lg tracking-wide shadow-lg transition-all ${
-                        isKeyReady 
-                          ? 'bg-gradient-to-r from-neon-blue to-neon-purple text-white shadow-neon-blue/20 hover:shadow-neon-blue/40 hover:scale-[1.02]' 
-                          : 'bg-gray-700 text-gray-400 cursor-not-allowed'
-                      }`}
-                    >
-                      Initiate Agent Loop
-                    </button>
-                  ) : (
-                    <div className="w-full py-4 rounded-lg bg-gray-800 border border-gray-700 text-center text-neon-blue font-medium flex items-center justify-center space-x-2">
-                       <span className="w-2 h-2 bg-neon-blue rounded-full animate-pulse"></span>
-                       <span>Processing: {step}</span>
-                    </div>
-                  )}
-                </form>
-              </>
-            ) : (
-              <>
-                <h2 className="text-xl font-semibold mb-6 flex items-center text-white">
-                  <span className="w-2 h-8 bg-neon-purple rounded-full mr-3"></span>
-                  Voice Cloning & Lipsync
-                </h2>
-                <div className="space-y-6">
-                  {/* Phase 1: Voice Analysis */}
-                  <div>
-                    <h3 className="text-sm text-gray-400 mb-2 uppercase tracking-wide">Phase 1: Voice Analysis</h3>
-                    <AudioRecorder onRecordingComplete={handleVoiceRecording} />
-                    {voiceData.voiceProfile && (
-                       <div className="mt-3 bg-gray-800 p-3 rounded text-xs space-y-1 border border-gray-700">
-                          <p><span className="text-gray-400">Tone:</span> {voiceData.voiceProfile.tone}</p>
-                          <p><span className="text-gray-400">Match:</span> <span className="text-neon-purple font-bold">{voiceData.voiceProfile.recommended_voice_id}</span></p>
-                          <div className="w-full bg-gray-700 h-1 rounded-full mt-2">
-                            <div className="bg-neon-purple h-1 rounded-full" style={{ width: `${voiceData.voiceProfile.confidence * 100}%` }}></div>
-                          </div>
-                       </div>
+              <div className="space-y-5">
+                <div>
+                  <label className="block text-sm text-gray-400 mb-2">Character Name</label>
+                  <input
+                    type="text"
+                    value={name}
+                    onChange={(e) => setName(e.target.value)}
+                    disabled={isGenerating}
+                    placeholder="e.g., Nova, Cipher, Atlas..."
+                    className="w-full bg-black/40 border border-white/10 rounded-xl px-4 py-3 text-white placeholder-gray-600 focus:outline-none focus:border-cyan-500/50 focus:ring-1 focus:ring-cyan-500/25 transition-all disabled:opacity-50"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm text-gray-400 mb-2">Description</label>
+                  <textarea
+                    value={description}
+                    onChange={(e) => setDescription(e.target.value)}
+                    disabled={isGenerating}
+                    placeholder="Describe your character's appearance, personality, outfit..."
+                    rows={3}
+                    className="w-full bg-black/40 border border-white/10 rounded-xl px-4 py-3 text-white placeholder-gray-600 focus:outline-none focus:border-cyan-500/50 focus:ring-1 focus:ring-cyan-500/25 transition-all resize-none disabled:opacity-50"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm text-gray-400 mb-2">Art Style</label>
+                  <input
+                    type="text"
+                    value={style}
+                    onChange={(e) => setStyle(e.target.value)}
+                    disabled={isGenerating}
+                    placeholder="e.g., Cyberpunk, Fantasy, Anime..."
+                    className="w-full bg-black/40 border border-white/10 rounded-xl px-4 py-3 text-white placeholder-gray-600 focus:outline-none focus:border-cyan-500/50 focus:ring-1 focus:ring-cyan-500/25 transition-all disabled:opacity-50"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm text-gray-400 mb-2">Reference Image (Optional)</label>
+                  <div 
+                    onClick={() => !isGenerating && fileInputRef.current?.click()}
+                    className={`border-2 border-dashed border-white/10 rounded-xl p-4 text-center cursor-pointer hover:border-cyan-500/30 hover:bg-cyan-500/5 transition-all ${isGenerating ? 'opacity-50 cursor-not-allowed' : ''}`}
+                  >
+                    <input
+                      type="file"
+                      ref={fileInputRef}
+                      onChange={handleFileUpload}
+                      accept="image/*"
+                      className="hidden"
+                      disabled={isGenerating}
+                    />
+                    {referenceImage ? (
+                      <div className="flex items-center justify-center gap-3">
+                        <img src={`data:image/jpeg;base64,${referenceImage}`} alt="Reference" className="w-16 h-16 rounded-lg object-cover" />
+                        <span className="text-sm text-green-400">Reference uploaded</span>
+                      </div>
+                    ) : (
+                      <div className="text-gray-500">
+                        <svg className="w-8 h-8 mx-auto mb-2 opacity-50" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                        </svg>
+                        <p className="text-sm">Drop an image or click to upload</p>
+                      </div>
                     )}
                   </div>
+                </div>
 
-                  {/* Phase 2: Script */}
-                  <div>
-                    <h3 className="text-sm text-gray-400 mb-2 uppercase tracking-wide">Phase 2: Script</h3>
-                    <textarea 
-                      value={voiceData.script}
-                      onChange={(e) => setVoiceData({...voiceData, script: e.target.value})}
-                      className="w-full bg-gray-850 border border-gray-700 rounded-lg px-4 py-3 text-white focus:outline-none focus:border-neon-purple transition-all resize-none"
-                      rows={3}
-                      placeholder="Enter what the character should say..."
-                    />
+                {error && (
+                  <div className="bg-red-500/10 border border-red-500/20 rounded-xl p-3 text-red-400 text-sm">
+                    {error}
                   </div>
+                )}
 
-                  <button 
-                    onClick={handleGenerateLipsync}
-                    disabled={isVoiceProcessing || !voiceData.voiceProfile}
-                    className="w-full py-4 rounded-lg font-bold text-lg tracking-wide bg-gradient-to-r from-neon-purple to-pink-500 text-white shadow-lg hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    {isVoiceProcessing ? 'Processing...' : 'Generate Lipsync Animation'}
-                  </button>
-                </div>
-              </>
-            )}
-          </div>
-
-          <div className="bg-black/50 border border-gray-800 rounded-xl p-4 h-72 overflow-hidden flex flex-col font-mono text-xs">
-            <div className="flex items-center justify-between mb-2 text-gray-500 uppercase tracking-wider text-[10px]">
-              <span>System Log</span>
-              <div className="flex space-x-1">
-                <span className="w-2 h-2 rounded-full bg-red-500"></span>
-                <span className="w-2 h-2 rounded-full bg-yellow-500"></span>
-                <span className="w-2 h-2 rounded-full bg-green-500"></span>
+                <button
+                  onClick={phase === 'complete' || phase === 'error' ? reset : generateAll}
+                  disabled={isGenerating}
+                  className={`w-full py-4 rounded-xl font-semibold text-lg transition-all ${
+                    isGenerating 
+                      ? 'bg-gray-800 text-gray-500 cursor-not-allowed'
+                      : phase === 'complete' || phase === 'error'
+                      ? 'bg-white/10 hover:bg-white/20 text-white border border-white/10'
+                      : 'bg-gradient-to-r from-cyan-500 to-purple-500 text-white shadow-lg shadow-purple-500/25 hover:shadow-purple-500/40 hover:scale-[1.02]'
+                  }`}
+                >
+                  {isGenerating ? (
+                    <span className="flex items-center justify-center gap-2">
+                      <svg className="animate-spin h-5 w-5" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                      </svg>
+                      Generating...
+                    </span>
+                  ) : phase === 'complete' || phase === 'error' ? (
+                    'Start New Generation'
+                  ) : (
+                    'Generate Avatar + Video + 3D Model'
+                  )}
+                </button>
               </div>
             </div>
-            <div className="flex-1 overflow-y-auto space-y-2 pr-2">
-              {logs.map((log, i) => (
-                <div key={i} className="flex gap-2">
-                  <span className="text-gray-600 select-none">[{log.timestamp}]</span>
-                  <span className={`${
-                    log.type === 'error' ? 'text-red-400' : 
-                    log.type === 'success' ? 'text-green-400' : 
-                    log.type === 'warning' ? 'text-yellow-400' : 'text-neon-blue'
-                  }`}>
-                    {">"} {log.message}
-                  </span>
-                </div>
-              ))}
-              <div ref={logsEndRef} />
-            </div>
-          </div>
-        </div>
 
-        {/* RIGHT PANEL: DISPLAY */}
-        <div className="lg:col-span-8 space-y-6">
-          <div className="bg-gray-900 border border-gray-800 rounded-2xl p-1 min-h-[600px] flex flex-col relative overflow-hidden shadow-2xl">
-            
-            {step === AppStep.INPUT && !generatedImage && (
-              <div className="flex-1 flex flex-col items-center justify-center text-gray-600">
-                <div className="w-24 h-24 mb-4 border-2 border-dashed border-gray-700 rounded-full flex items-center justify-center">
-                  <svg className="w-10 h-10" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
-                  </svg>
-                </div>
-                <p>Step 1: Enter character details</p>
-              </div>
-            )}
-
-            {step === AppStep.OPTIMIZING_PROMPT && <LoadingOverlay message="Step 2: Analysis" subMessage="Gemini 3 Pro is integrating your inputs..." />}
-            {step === AppStep.CRITIQUING && <LoadingOverlay message="Step 3: Critique Loop" subMessage={`Agent is auditing the output (Cycle ${loopCount + 1})...`} />}
-            {step === AppStep.REFINING && <LoadingOverlay message="Step 4: Self-Correction" subMessage="Refining prompt based on critique..." />}
-            {isVoiceProcessing && <LoadingOverlay message="Voice Studio" subMessage="Synthesizing audio and calculating viseme timing..." />}
-
-            {/* VISUAL MODE DISPLAY */}
-            {activeTab === 'VISUAL' && generatedImage && !generatedVideoUrl && (
-               <div className="flex-1 flex flex-col relative animate-fade-in">
-                 {(step === AppStep.GENERATING_VIDEO) && (
-                   <div className="absolute inset-0 flex items-center justify-center bg-black/70 backdrop-blur-sm z-20">
-                      <LoadingOverlay message="Step 6: Veo 3.1" subMessage="Synthesizing cinematic 360-degree rotation..." />
-                   </div>
-                 )}
-                 <img 
-                  src={`data:${generatedImage.mimeType};base64,${generatedImage.data}`} 
-                  alt="Draft" 
-                  className={`w-full h-full object-contain bg-gray-950 transition-opacity duration-500 ${step === AppStep.REFINING ? 'opacity-50 blur-sm' : 'opacity-100'}`}
-                 />
-                 
-                 {critique && step === AppStep.CRITIQUING && (
-                    <div className="absolute bottom-6 left-6 right-6 bg-black/80 backdrop-blur border border-yellow-500/50 p-4 rounded-xl z-10 animate-slide-up">
-                      <div className="flex items-start justify-between">
-                        <div>
-                          <h4 className="text-yellow-400 font-bold mb-1">Agent Critique</h4>
-                          <p className="text-sm text-gray-300">{critique.feedback}</p>
-                        </div>
-                        <div className="text-2xl font-bold text-white bg-gray-800 px-3 py-1 rounded">
-                          {critique.score}
-                        </div>
-                      </div>
+            {/* Progress & Logs */}
+            {(isGenerating || logs.length > 0) && (
+              <div className="bg-black/40 backdrop-blur-xl border border-white/5 rounded-2xl p-4">
+                {/* Progress Bar */}
+                {isGenerating && (
+                  <div className="mb-4">
+                    <div className="flex justify-between text-xs text-gray-400 mb-2">
+                      <span>{phase.replace(/-/g, ' ').replace(/^\w/, c => c.toUpperCase())}</span>
+                      <span>{Math.round(progress)}%</span>
                     </div>
-                 )}
+                    <div className="h-1.5 bg-white/5 rounded-full overflow-hidden">
+                      <div 
+                        className="h-full bg-gradient-to-r from-cyan-500 to-purple-500 rounded-full transition-all duration-500"
+                        style={{ width: `${progress}%` }}
+                      />
+                    </div>
+                  </div>
+                )}
 
-                 {step === AppStep.AWAITING_APPROVAL && (
-                   <div className="absolute inset-0 flex items-center justify-center bg-black/80 backdrop-blur-sm z-30">
-                     <div className="bg-gray-900 border border-gray-700 p-8 rounded-2xl max-w-md text-center shadow-2xl">
-                       <h3 className="text-xl font-bold text-white mb-2">Step 5: Validation Required</h3>
-                       <p className="text-gray-400 mb-6">
-                         The agent completed 3 refinement loops but the quality score ({critique?.score}%) is below threshold.
-                       </p>
-                       <div className="flex space-x-4 justify-center">
-                         <button onClick={handleApprove} className="px-6 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg font-medium">
-                           Approve & Generate Video
-                         </button>
-                       </div>
-                     </div>
-                   </div>
-                 )}
-               </div>
+                {/* Logs */}
+                <div className="h-48 overflow-y-auto space-y-1 font-mono text-xs">
+                  {logs.map((log, i) => (
+                    <div key={i} className={`flex gap-2 ${
+                      log.type === 'error' ? 'text-red-400' :
+                      log.type === 'success' ? 'text-green-400' :
+                      log.type === 'warning' ? 'text-yellow-400' :
+                      'text-gray-400'
+                    }`}>
+                      <span className="text-gray-600">[{log.timestamp}]</span>
+                      <span>{log.message}</span>
+                    </div>
+                  ))}
+                  <div ref={logsEndRef} />
+                </div>
+              </div>
             )}
+          </div>
 
-            {/* VOICE MODE DISPLAY (LIPSYNC) */}
-            {activeTab === 'VOICE' && generatedImage && (
-              <div className="flex-1 flex flex-col bg-black relative">
-                {voiceData.generatedAudioBase64 && voiceData.visemes && voiceData.mouthData ? (
-                  <LipsyncPreview 
-                    imageBase64={generatedImage.data}
-                    audioBase64={voiceData.generatedAudioBase64}
-                    visemes={voiceData.visemes}
-                    mouthData={voiceData.mouthData}
+          {/* Right Panel - Output */}
+          <div className="space-y-6">
+            {/* Main Preview */}
+            <div className="bg-white/[0.02] backdrop-blur-xl border border-white/5 rounded-2xl overflow-hidden">
+              <div className="aspect-square relative bg-gradient-to-br from-gray-900 to-black flex items-center justify-center">
+                {avatarImage ? (
+                  <img 
+                    src={`data:${avatarImage.mimeType};base64,${avatarImage.data}`}
+                    alt="Generated Avatar"
+                    className="w-full h-full object-contain"
                   />
                 ) : (
-                  <div className="flex-1 flex items-center justify-center text-gray-500">
-                    <p>Record voice and generate lipsync to preview animation</p>
+                  <div className="text-center text-gray-600">
+                    <svg className="w-20 h-20 mx-auto mb-4 opacity-20" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M14 10l-2 1m0 0l-2-1m2 1v2.5M20 7l-2 1m2-1l-2-1m2 1v2.5M14 4l-2-1-2 1M4 7l2-1M4 7l2 1M4 7v2.5M12 21l-2-1m2 1l2-1m-2 1v-2.5M6 18l-2-1v-2.5M18 18l2-1v-2.5" />
+                    </svg>
+                    <p className="text-sm">Your avatar will appear here</p>
+                  </div>
+                )}
+
+                {isGenerating && (
+                  <div className="absolute inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center">
+                    <div className="text-center">
+                      <div className="w-16 h-16 border-2 border-cyan-500/30 border-t-cyan-500 rounded-full animate-spin mx-auto mb-4"></div>
+                      <p className="text-sm text-gray-300">{phase.replace(/-/g, ' ').replace(/^\w/, c => c.toUpperCase())}...</p>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Output Grid - Unified sizes */}
+            {(videoUrl || model3DUrl) && (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                {/* Video Card */}
+                {videoUrl && (
+                  <div className="bg-white/[0.02] border border-white/5 rounded-xl overflow-hidden">
+                    <div className="aspect-square bg-black flex items-center justify-center">
+                      <video src={videoUrl} autoPlay loop muted playsInline className="w-full h-full object-contain" />
+                    </div>
+                    <div className="p-3 flex items-center justify-between border-t border-white/5">
+                      <span className="text-xs text-gray-400">360° Video</span>
+                      <a href={videoUrl} download={`${name}-video.mp4`} className="text-xs text-cyan-400 hover:text-cyan-300 font-medium">
+                        ↓ Download
+                      </a>
+                    </div>
+                  </div>
+                )}
+
+                {/* 3D Model Card */}
+                {model3DUrl && (
+                  <div className="bg-white/[0.02] border border-white/5 rounded-xl overflow-hidden">
+                    <div className="aspect-square bg-gradient-to-br from-purple-900/20 to-black flex items-center justify-center">
+                      {model3DPreview ? (
+                        <img src={model3DPreview} alt="3D Preview" className="w-full h-full object-contain" />
+                      ) : (
+                        <div className="text-center">
+                          <svg className="w-16 h-16 text-purple-500/50 mx-auto mb-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M14 10l-2 1m0 0l-2-1m2 1v2.5M20 7l-2 1m2-1l-2-1m2 1v2.5M14 4l-2-1-2 1M4 7l2-1M4 7l2 1M4 7v2.5M12 21l-2-1m2 1l2-1m-2 1v-2.5M6 18l-2-1v-2.5M18 18l2-1v-2.5" />
+                          </svg>
+                          <p className="text-xs text-gray-500">3D Model Ready</p>
+                        </div>
+                      )}
+                    </div>
+                    <div className="p-3 flex items-center justify-between border-t border-white/5">
+                      <span className="text-xs text-gray-400">3D Model (GLB)</span>
+                      <button onClick={download3DModel} className="text-xs text-purple-400 hover:text-purple-300 font-medium">
+                        ↓ Download
+                      </button>
+                    </div>
                   </div>
                 )}
               </div>
             )}
-
-            {/* VEO VIDEO DISPLAY */}
-            {generatedVideoUrl && activeTab === 'VISUAL' && (
-              <div className="flex-1 flex flex-col bg-black rounded-xl overflow-hidden relative group">
-                <video src={generatedVideoUrl} autoPlay loop muted playsInline controls className="w-full h-full object-contain" />
-              </div>
-            )}
-
-             {step === AppStep.ERROR && (
-              <div className="flex-1 flex flex-col items-center justify-center text-red-400 p-8 text-center">
-                 <h3 className="text-xl font-bold mb-2">Generation Failed</h3>
-                 <p className="max-w-md text-gray-400 mb-6">{error}</p>
-                 <button onClick={reset} className="px-6 py-2 bg-gray-800 hover:bg-gray-700 rounded-lg text-white">Try Again</button>
-              </div>
-            )}
           </div>
-
-          {(step === AppStep.COMPLETE || step === AppStep.AWAITING_APPROVAL) && activeTab === 'VISUAL' && (
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
-                 <h3 className="text-sm font-medium text-neon-blue mb-3 uppercase tracking-wider flex items-center">
-                    <span className="w-2 h-2 bg-neon-blue rounded-full mr-2"></span>
-                    Step 7: User Feedback Loop
-                 </h3>
-                 <div className="space-y-3">
-                   <textarea
-                     value={userFeedback}
-                     onChange={(e) => setUserFeedback(e.target.value)}
-                     placeholder="e.g. 'I like it but make the visor BRIGHTER'"
-                     className="w-full bg-gray-850 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:border-neon-blue focus:outline-none resize-none"
-                     rows={2}
-                   />
-                   <button 
-                     onClick={handleUserRefine}
-                     disabled={!userFeedback.trim()}
-                     className="w-full py-2 bg-gray-800 hover:bg-gray-700 border border-gray-700 text-white text-sm rounded-lg disabled:opacity-50"
-                   >
-                     Submit Feedback & Refine Avatar
-                   </button>
-                 </div>
-              </div>
-
-              <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 flex flex-col justify-between">
-                   <div className="space-y-3">
-                     <button onClick={reset} className="w-full py-2 bg-gray-800 hover:bg-gray-700 text-white rounded-lg border border-gray-700 text-sm">
-                       Start Over
-                     </button>
-                     {generatedVideoUrl && (
-                        <a 
-                          href={generatedVideoUrl || '#'} 
-                          download={`avatar-${formData.name}.mp4`}
-                          className="block w-full text-center py-2 bg-neon-blue/10 hover:bg-neon-blue/20 text-neon-blue border border-neon-blue/50 rounded-lg text-sm font-bold"
-                        >
-                          Download Video
-                        </a>
-                     )}
-                   </div>
-              </div>
-            </div>
-          )}
         </div>
       </main>
+
+      {/* Footer */}
+      <footer className="relative z-10 border-t border-white/5 mt-12">
+        <div className="max-w-7xl mx-auto px-6 py-4 text-center text-xs text-gray-600">
+          Powered by Gemini 3 Pro • Veo 3.1 • Tripo3D
+        </div>
+      </footer>
     </div>
   );
 };
